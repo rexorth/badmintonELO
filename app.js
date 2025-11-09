@@ -517,6 +517,7 @@ function generateMatches() {
     const matchType = document.getElementById('match-type').value;
     const selectedPlayerIds = getSelectedPlayers();
     const numRounds = parseInt(document.getElementById('num-rounds').value) || 1;
+    const numCourts = parseInt(document.getElementById('num-courts').value) || 4;
     
     if (selectedPlayerIds.length < (matchType === 'singles' ? 2 : 4)) {
         alert(`Need at least ${matchType === 'singles' ? 2 : 4} selected players for ${matchType} matches`);
@@ -528,10 +529,15 @@ function generateMatches() {
         return;
     }
     
+    if (numCourts < 1 || numCourts > 20) {
+        alert('Number of courts must be between 1 and 20');
+        return;
+    }
+    
     if (matchType === 'singles') {
-        generateSinglesMatches(selectedPlayerIds, numRounds);
+        generateSinglesMatches(selectedPlayerIds, numRounds, numCourts);
     } else {
-        generateDoublesMatches(selectedPlayerIds, numRounds);
+        generateDoublesMatches(selectedPlayerIds, numRounds, numCourts);
     }
     
     saveData();
@@ -539,10 +545,25 @@ function generateMatches() {
     renderScores();
 }
 
-function generateSinglesMatches(selectedPlayerIds, numRounds) {
+// Helper function to get the maximum round number from existing matches
+function getMaxRoundNumber() {
+    if (matches.length === 0) return 0;
+    return matches.reduce((max, match) => {
+        const round = match.round;
+        if (round && typeof round === 'number') {
+            return Math.max(max, round);
+        }
+        return max;
+    }, 0);
+}
+
+function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
     const newMatches = [];
     const baseTime = Date.now();
     let matchIndex = 0;
+    
+    // Get the maximum existing round number and start new rounds from the next round
+    const startRound = getMaxRoundNumber() + 1;
     
     // Track opponents used in this generation session
     const sessionOpponents = {};
@@ -553,12 +574,14 @@ function generateSinglesMatches(selectedPlayerIds, numRounds) {
     // Track which players played in the previous round
     let playersWhoDidNotPlay = new Set(selectedPlayerIds);
     
-    for (let round = 1; round <= numRounds; round++) {
+    for (let round = startRound; round < startRound + numRounds; round++) {
         // Calculate pairings for this round, prioritizing players who didn't play in the previous round
+        // Limit to maxCourts matches per round
         const roundPairings = minimizeRepeatedOpponentsMultiRound(
             selectedPlayerIds, 
             sessionOpponents,
-            playersWhoDidNotPlay
+            playersWhoDidNotPlay,
+            maxCourts
         );
         
         if (roundPairings.length === 0 && selectedPlayerIds.length >= 2) {
@@ -612,10 +635,13 @@ function generateSinglesMatches(selectedPlayerIds, numRounds) {
     matches.push(...newMatches);
 }
 
-function generateDoublesMatches(selectedPlayerIds, numRounds) {
+function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
     const newMatches = [];
     const baseTime = Date.now();
     let matchIndex = 0;
+    
+    // Get the maximum existing round number and start new rounds from the next round
+    const startRound = getMaxRoundNumber() + 1;
     
     // Track partners used in this generation session
     const sessionPartners = {};
@@ -626,12 +652,14 @@ function generateDoublesMatches(selectedPlayerIds, numRounds) {
     // Track which players played in the previous round
     let playersWhoDidNotPlay = new Set(selectedPlayerIds);
     
-    for (let round = 1; round <= numRounds; round++) {
+    for (let round = startRound; round < startRound + numRounds; round++) {
         // Calculate pairings for this round, prioritizing players who didn't play in the previous round
+        // Limit to maxCourts matches per round
         const roundPairings = minimizeRepeatedPartnersMultiRound(
             selectedPlayerIds, 
             sessionPartners,
-            playersWhoDidNotPlay
+            playersWhoDidNotPlay,
+            maxCourts
         );
         
         if (roundPairings.length === 0 && selectedPlayerIds.length >= 4) {
@@ -697,7 +725,7 @@ function generateDoublesMatches(selectedPlayerIds, numRounds) {
 }
 
 // Algorithm to minimize repeated opponents (singles) - multi-round version
-function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, playersWhoDidNotPlay = new Set()) {
+function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, playersWhoDidNotPlay = new Set(), maxCourts = Infinity) {
     if (playerIds.length < 2) return [];
     
     const pairings = [];
@@ -812,72 +840,92 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
                 pairings.push(pair);
                 usedPlayers.add(pair[0]);
                 usedPlayers.add(pair[1]);
+                // Stop if we've reached the court limit
+                if (pairings.length >= maxCourts) break;
             }
         }
         
         // If some players who didn't play still aren't matched, pair them with others
-        const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id));
-        if (stillUnmatched.length > 0) {
-            for (const unmatchedPlayerId of stillUnmatched) {
-                // Find the best available partner for this player
-                const availablePairs = possiblePairs.filter(p => 
-                    (p.pair[0] === unmatchedPlayerId || p.pair[1] === unmatchedPlayerId) &&
-                    !usedPlayers.has(p.pair[0]) && 
-                    !usedPlayers.has(p.pair[1])
-                );
-                
-                if (availablePairs.length > 0) {
-                    // Sort by priority and take the best one
-                    availablePairs.sort((a, b) => a.priorityScore - b.priorityScore);
-                    const bestPair = availablePairs[0].pair;
-                    pairings.push(bestPair);
-                    usedPlayers.add(bestPair[0]);
-                    usedPlayers.add(bestPair[1]);
+        // Only if we haven't reached the court limit
+        if (pairings.length < maxCourts) {
+            const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id));
+            if (stillUnmatched.length > 0) {
+                for (const unmatchedPlayerId of stillUnmatched) {
+                    // Stop if we've reached the court limit
+                    if (pairings.length >= maxCourts) break;
+                    
+                    // Find the best available partner for this player
+                    const availablePairs = possiblePairs.filter(p => 
+                        (p.pair[0] === unmatchedPlayerId || p.pair[1] === unmatchedPlayerId) &&
+                        !usedPlayers.has(p.pair[0]) && 
+                        !usedPlayers.has(p.pair[1])
+                    );
+                    
+                    if (availablePairs.length > 0) {
+                        // Sort by priority and take the best one
+                        availablePairs.sort((a, b) => a.priorityScore - b.priorityScore);
+                        const bestPair = availablePairs[0].pair;
+                        pairings.push(bestPair);
+                        usedPlayers.add(bestPair[0]);
+                        usedPlayers.add(bestPair[1]);
+                    }
                 }
             }
         }
     }
     
     // Now fill in remaining players, avoiding session repeats when possible
-    for (const { pair, sessionRepeat } of possiblePairs) {
-        // Skip if already used or if it's a session repeat (when we can avoid it)
-        if (sessionRepeat > 0) continue;
-        if (usedPlayers.has(pair[0]) || usedPlayers.has(pair[1])) continue;
-        
-        pairings.push(pair);
-        usedPlayers.add(pair[0]);
-        usedPlayers.add(pair[1]);
+    // Only if we haven't reached the court limit
+    if (pairings.length < maxCourts) {
+        for (const { pair, sessionRepeat } of possiblePairs) {
+            // Stop if we've reached the court limit
+            if (pairings.length >= maxCourts) break;
+            
+            // Skip if already used or if it's a session repeat (when we can avoid it)
+            if (sessionRepeat > 0) continue;
+            if (usedPlayers.has(pair[0]) || usedPlayers.has(pair[1])) continue;
+            
+            pairings.push(pair);
+            usedPlayers.add(pair[0]);
+            usedPlayers.add(pair[1]);
+        }
     }
     
     // If we have remaining players, allow some session repeats but minimize them
-    const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
-    if (remainingPlayers.length >= 2) {
-        // Get all possible pairs for remaining players, including those with session repeats
-        const remainingPairs = [];
-        for (let i = 0; i < remainingPlayers.length; i++) {
-            for (let j = i + 1; j < remainingPlayers.length; j++) {
-                const p1 = remainingPlayers[i];
-                const p2 = remainingPlayers[j];
-                const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
-                const historyRepeat = (opponentCounts[p1] && opponentCounts[p1][p2]) || 0;
-                remainingPairs.push({
-                    pair: [p1, p2],
-                    sessionRepeat: sessionRepeat,
-                    repeatScore: sessionRepeat * 1000 + historyRepeat
-                });
+    // Only if we haven't reached the court limit
+    if (pairings.length < maxCourts) {
+        const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
+        if (remainingPlayers.length >= 2) {
+            // Get all possible pairs for remaining players, including those with session repeats
+            const remainingPairs = [];
+            for (let i = 0; i < remainingPlayers.length; i++) {
+                for (let j = i + 1; j < remainingPlayers.length; j++) {
+                    const p1 = remainingPlayers[i];
+                    const p2 = remainingPlayers[j];
+                    const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
+                    const historyRepeat = (opponentCounts[p1] && opponentCounts[p1][p2]) || 0;
+                    remainingPairs.push({
+                        pair: [p1, p2],
+                        sessionRepeat: sessionRepeat,
+                        repeatScore: sessionRepeat * 1000 + historyRepeat
+                    });
+                }
             }
-        }
-        
-        if (remainingPairs.length > 0) {
-            remainingPairs.sort((a, b) => a.repeatScore - b.repeatScore);
             
-            const usedRemaining = new Set();
-            for (const { pair } of remainingPairs) {
-                if (!usedRemaining.has(pair[0]) && !usedRemaining.has(pair[1])) {
-                    pairings.push(pair);
-                    usedRemaining.add(pair[0]);
-                    usedRemaining.add(pair[1]);
-                    if (usedRemaining.size === remainingPlayers.length) break;
+            if (remainingPairs.length > 0) {
+                remainingPairs.sort((a, b) => a.repeatScore - b.repeatScore);
+                
+                const usedRemaining = new Set();
+                for (const { pair } of remainingPairs) {
+                    // Stop if we've reached the court limit
+                    if (pairings.length >= maxCourts) break;
+                    
+                    if (!usedRemaining.has(pair[0]) && !usedRemaining.has(pair[1])) {
+                        pairings.push(pair);
+                        usedRemaining.add(pair[0]);
+                        usedRemaining.add(pair[1]);
+                        if (usedRemaining.size === remainingPlayers.length) break;
+                    }
                 }
             }
         }
@@ -890,7 +938,9 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
         pairings.push(possiblePairs[0].pair);
     }
     
-    return pairings;
+    // Limit to maxCourts matches (since each pairing is one match)
+    // The pairings are already in priority order, so we just take the first maxCourts
+    return pairings.slice(0, maxCourts);
 }
 
 // Legacy function for backward compatibility
@@ -903,7 +953,7 @@ function minimizeRepeatedOpponents(playerIds) {
 }
 
 // Algorithm to minimize repeated partners (doubles) - multi-round version
-function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersWhoDidNotPlay = new Set()) {
+function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersWhoDidNotPlay = new Set(), maxCourts = Infinity) {
     if (playerIds.length < 4) return [];
     
     const matches = [];
@@ -1003,12 +1053,14 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
     
     // Greedily select teams to maximize matches while minimizing partner repeats
     // First, prioritize teams that include players who didn't play in the previous round
+    // We need maxCourts * 2 teams (2 teams per match)
+    const maxTeamsNeeded = maxCourts * 2;
     const usedPlayers = new Set();
     const selectedTeams = [];
     const playersWhoDidNotPlayArray = Array.from(playersWhoDidNotPlay);
     
     // First pass: prioritize teams with players who didn't play, avoiding session repeats
-    if (playersWhoDidNotPlayArray.length > 0) {
+    if (playersWhoDidNotPlayArray.length > 0 && selectedTeams.length < maxTeamsNeeded) {
         // Try to create teams that include players who didn't play
         const priorityTeams = possibleTeams.filter(t => 
             t.includesPlayerWhoDidNotPlay && 
@@ -1018,6 +1070,7 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         );
         
         for (const teamData of priorityTeams) {
+            if (selectedTeams.length >= maxTeamsNeeded) break;
             if (!usedPlayers.has(teamData.team[0]) && !usedPlayers.has(teamData.team[1])) {
                 selectedTeams.push(teamData.team);
                 usedPlayers.add(teamData.team[0]);
@@ -1026,76 +1079,89 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         }
         
         // If some players who didn't play still aren't in a team, create teams for them
-        const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id));
-        if (stillUnmatched.length > 0) {
-            for (const unmatchedPlayerId of stillUnmatched) {
-                // Find the best available partner for this player
-                const availableTeams = possibleTeams.filter(t => 
-                    (t.team[0] === unmatchedPlayerId || t.team[1] === unmatchedPlayerId) &&
-                    !usedPlayers.has(t.team[0]) && 
-                    !usedPlayers.has(t.team[1])
-                );
-                
-                if (availableTeams.length > 0) {
-                    // Sort by priority and take the best one
-                    availableTeams.sort((a, b) => a.priorityScore - b.priorityScore);
-                    const bestTeam = availableTeams[0].team;
-                    selectedTeams.push(bestTeam);
-                    usedPlayers.add(bestTeam[0]);
-                    usedPlayers.add(bestTeam[1]);
+        if (selectedTeams.length < maxTeamsNeeded) {
+            const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id));
+            if (stillUnmatched.length > 0) {
+                for (const unmatchedPlayerId of stillUnmatched) {
+                    if (selectedTeams.length >= maxTeamsNeeded) break;
+                    
+                    // Find the best available partner for this player
+                    const availableTeams = possibleTeams.filter(t => 
+                        (t.team[0] === unmatchedPlayerId || t.team[1] === unmatchedPlayerId) &&
+                        !usedPlayers.has(t.team[0]) && 
+                        !usedPlayers.has(t.team[1])
+                    );
+                    
+                    if (availableTeams.length > 0) {
+                        // Sort by priority and take the best one
+                        availableTeams.sort((a, b) => a.priorityScore - b.priorityScore);
+                        const bestTeam = availableTeams[0].team;
+                        selectedTeams.push(bestTeam);
+                        usedPlayers.add(bestTeam[0]);
+                        usedPlayers.add(bestTeam[1]);
+                    }
                 }
             }
         }
     }
     
     // Second pass: fill in remaining teams with no session repeats
-    for (const teamData of possibleTeams) {
-        if (teamData.sessionRepeat > 0) continue; // Skip teams that already partnered in this session
-        if (usedPlayers.has(teamData.team[0]) || usedPlayers.has(teamData.team[1])) continue;
-        
-        selectedTeams.push(teamData.team);
-        usedPlayers.add(teamData.team[0]);
-        usedPlayers.add(teamData.team[1]);
+    if (selectedTeams.length < maxTeamsNeeded) {
+        for (const teamData of possibleTeams) {
+            if (selectedTeams.length >= maxTeamsNeeded) break;
+            if (teamData.sessionRepeat > 0) continue; // Skip teams that already partnered in this session
+            if (usedPlayers.has(teamData.team[0]) || usedPlayers.has(teamData.team[1])) continue;
+            
+            selectedTeams.push(teamData.team);
+            usedPlayers.add(teamData.team[0]);
+            usedPlayers.add(teamData.team[1]);
+        }
     }
     
     // If we need more teams, allow some session repeats but minimize them
-    const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
-    if (remainingPlayers.length >= 2) {
-        const remainingTeams = [];
-        for (let i = 0; i < remainingPlayers.length; i++) {
-            for (let j = i + 1; j < remainingPlayers.length; j++) {
-                const team = [remainingPlayers[i], remainingPlayers[j]].sort();
-                const p1 = team[0];
-                const p2 = team[1];
-                const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
-                const historyRepeat = (partnerCounts[p1] && partnerCounts[p1][p2]) || 0;
-                remainingTeams.push({
-                    team: team,
-                    sessionRepeat: sessionRepeat,
-                    repeatScore: sessionRepeat * 1000 + historyRepeat
-                });
+    if (selectedTeams.length < maxTeamsNeeded) {
+        const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
+        if (remainingPlayers.length >= 2) {
+            const remainingTeams = [];
+            for (let i = 0; i < remainingPlayers.length; i++) {
+                for (let j = i + 1; j < remainingPlayers.length; j++) {
+                    const team = [remainingPlayers[i], remainingPlayers[j]].sort();
+                    const p1 = team[0];
+                    const p2 = team[1];
+                    const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
+                    const historyRepeat = (partnerCounts[p1] && partnerCounts[p1][p2]) || 0;
+                    remainingTeams.push({
+                        team: team,
+                        sessionRepeat: sessionRepeat,
+                        repeatScore: sessionRepeat * 1000 + historyRepeat
+                    });
+                }
             }
-        }
-        
-        if (remainingTeams.length > 0) {
-            remainingTeams.sort((a, b) => a.repeatScore - b.repeatScore);
             
-            const usedRemaining = new Set();
-            for (const teamData of remainingTeams) {
-                if (!usedRemaining.has(teamData.team[0]) && !usedRemaining.has(teamData.team[1])) {
-                    selectedTeams.push(teamData.team);
-                    usedRemaining.add(teamData.team[0]);
-                    usedRemaining.add(teamData.team[1]);
-                    if (usedRemaining.size === remainingPlayers.length) break;
+            if (remainingTeams.length > 0) {
+                remainingTeams.sort((a, b) => a.repeatScore - b.repeatScore);
+                
+                const usedRemaining = new Set();
+                for (const teamData of remainingTeams) {
+                    if (selectedTeams.length >= maxTeamsNeeded) break;
+                    if (!usedRemaining.has(teamData.team[0]) && !usedRemaining.has(teamData.team[1])) {
+                        selectedTeams.push(teamData.team);
+                        usedRemaining.add(teamData.team[0]);
+                        usedRemaining.add(teamData.team[1]);
+                        if (usedRemaining.size === remainingPlayers.length) break;
+                    }
                 }
             }
         }
     }
     
     // Create matches from selected teams (pair teams into matches)
+    // We've already limited teams to maxCourts * 2, so we can pair them directly
     for (let i = 0; i < selectedTeams.length; i += 2) {
         if (i + 1 < selectedTeams.length) {
             matches.push([selectedTeams[i], selectedTeams[i + 1]]);
+            // Stop if we've reached the court limit (safety check)
+            if (matches.length >= maxCourts) break;
         }
     }
     
@@ -1110,7 +1176,8 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         matches.push([bestTeams[0].team, bestTeams[1].team]);
     }
     
-    return matches;
+    // Ensure we don't exceed maxCourts (shouldn't happen, but safety check)
+    return matches.slice(0, maxCourts);
 }
 
 // Legacy function for backward compatibility
@@ -1625,6 +1692,22 @@ function initializeManualMatchDropdowns() {
             handleManualMatchSearch(e, field, dropdown);
         });
         
+        // Blur event - close dropdown when focus is lost (with delay to allow click events)
+        input.addEventListener('blur', (e) => {
+            // Use setTimeout to allow click events on dropdown items to fire first
+            // Also allows Enter key selection to complete before closing
+            setTimeout(() => {
+                // Only close if this field is still the active dropdown
+                // This prevents closing if user clicked on dropdown item or selected via Enter
+                if (activeManualDropdown === field) {
+                    dropdown.style.display = 'none';
+                    activeManualDropdown = null;
+                    activeManualDropdownIndex = -1;
+                    activeManualDropdownPlayers = [];
+                }
+            }, 200);
+        });
+        
         // Keydown event - keyboard navigation
         input.addEventListener('keydown', (e) => {
             handleManualMatchKeydown(e, field, dropdown);
@@ -1677,6 +1760,16 @@ function handleManualMatchSearch(event, field, dropdown) {
 function handleManualMatchKeydown(event, field, dropdown) {
     if (activeManualDropdown !== field) return;
     
+    // Handle Tab key - close dropdown immediately when tabbing away
+    if (event.key === 'Tab') {
+        dropdown.style.display = 'none';
+        activeManualDropdown = null;
+        activeManualDropdownIndex = -1;
+        activeManualDropdownPlayers = [];
+        // Don't prevent default - allow normal tab behavior
+        return;
+    }
+    
     const items = dropdown.querySelectorAll('.manual-dropdown-item:not(.disabled)');
     if (items.length === 0) {
         if (event.key === 'Enter') {
@@ -1724,7 +1817,9 @@ function handleManualMatchKeydown(event, field, dropdown) {
         case 'Escape':
             event.preventDefault();
             dropdown.style.display = 'none';
+            activeManualDropdown = null;
             activeManualDropdownIndex = -1;
+            activeManualDropdownPlayers = [];
             break;
     }
 }
@@ -1814,43 +1909,50 @@ function selectManualMatchPlayer(field, playerId) {
     if (input) {
         const player = players.find(p => p.id === playerId);
         if (player) {
+            // Set value without triggering input event to avoid reopening dropdown
             input.value = player.name;
         }
     }
     
-    // Hide dropdown
+    // Hide dropdown immediately
     const dropdownId = inputId.replace('-input', '-dropdown');
     const dropdown = document.getElementById(dropdownId);
     if (dropdown) {
         dropdown.style.display = 'none';
     }
     
-    // Reset active dropdown state
-    if (activeManualDropdown === field) {
-        activeManualDropdown = null;
-        activeManualDropdownIndex = -1;
-        activeManualDropdownPlayers = [];
-    }
+    // Reset active dropdown state immediately
+    // This prevents blur handler from trying to close it again
+    const wasActiveField = activeManualDropdown === field;
+    activeManualDropdown = null;
+    activeManualDropdownIndex = -1;
+    activeManualDropdownPlayers = [];
     
-    // Refresh other dropdowns to exclude the newly selected player
-    refreshManualMatchDropdowns();
+    // Don't refresh other dropdowns - they will update when focused
+    // This prevents other dropdowns from opening unexpectedly
 }
 
 function refreshManualMatchDropdowns() {
-    // Refresh all dropdowns to update excluded players
-    const inputs = document.querySelectorAll('.manual-player-input');
-    inputs.forEach(input => {
-        const field = input.getAttribute('data-field');
-        const dropdownId = input.id.replace('-input', '-dropdown');
-        const dropdown = document.getElementById(dropdownId);
-        if (dropdown && activeManualDropdown !== field) {
-            // Only update if this dropdown is not currently active
-            const searchTerm = input.value.toLowerCase().trim();
-            if (searchTerm === '' || players.some(p => p.name.toLowerCase().includes(searchTerm))) {
-                handleManualMatchSearch({ target: input }, field, dropdown);
+    // Refresh only the currently active dropdown to update excluded players
+    // Don't refresh other dropdowns as this would cause them to open unexpectedly
+    if (activeManualDropdown) {
+        const fieldToIdMap = {
+            'team1Player1': 'manual-team1-player1-input',
+            'team1Player2': 'manual-team1-player2-input',
+            'team2Player1': 'manual-team2-player1-input',
+            'team2Player2': 'manual-team2-player2-input'
+        };
+        const inputId = fieldToIdMap[activeManualDropdown];
+        const input = document.getElementById(inputId);
+        if (input) {
+            const dropdownId = inputId.replace('-input', '-dropdown');
+            const dropdown = document.getElementById(dropdownId);
+            if (dropdown && dropdown.style.display !== 'none') {
+                // Only refresh if the dropdown is currently visible
+                handleManualMatchSearch({ target: input }, activeManualDropdown, dropdown);
             }
         }
-    });
+    }
 }
 
 function submitManualMatch() {
