@@ -349,6 +349,55 @@ header h1 {
     margin-top: 20px;
 }
 
+.round-container {
+    margin-bottom: 30px;
+}
+
+.round-content {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.matches-container {
+    flex: 1;
+    min-width: 300px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.sitting-out-container {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 8px;
+    border: 2px solid #e0e0e0;
+    min-width: 200px;
+    max-width: 250px;
+    flex-shrink: 0;
+}
+
+.sitting-out-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.sitting-out-list li {
+    padding: 8px 12px;
+    margin-bottom: 5px;
+    background: white;
+    border-radius: 4px;
+    border-left: 3px solid #ffc107;
+    color: #666;
+    font-size: 0.9em;
+}
+
+.sitting-out-list li:last-child {
+    margin-bottom: 0;
+}
+
 .match-card {
     background: #f8f9fa;
     padding: 20px;
@@ -772,6 +821,15 @@ header h1 {
 
     .match-card .vs {
         transform: rotate(90deg);
+    }
+
+    .round-content {
+        flex-direction: column;
+    }
+
+    .sitting-out-container {
+        max-width: 100%;
+        width: 100%;
     }
 }
 

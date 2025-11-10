@@ -557,6 +557,68 @@ function getMaxRoundNumber() {
     }, 0);
 }
 
+// Helper function to get play history by round (which players played in each round)
+function getPlayHistoryByRound(selectedPlayerIds, matchType, currentRound) {
+    const playHistory = {}; // round -> Set of playerIds who played
+    const lastPlayRound = {}; // playerId -> last round they played
+    
+    // Initialize all players with round 0 (never played)
+    selectedPlayerIds.forEach(playerId => {
+        lastPlayRound[playerId] = 0;
+    });
+    
+    // Check existing matches (both uncompleted and completed/history)
+    const allMatches = [...matches, ...matchHistory];
+    
+    allMatches.forEach(match => {
+        if (match.type !== matchType) return;
+        if (!match.round || typeof match.round !== 'number') return;
+        if (match.round >= currentRound) return; // Only look at previous rounds
+        
+        const round = match.round;
+        if (!playHistory[round]) {
+            playHistory[round] = new Set();
+        }
+        
+        // Add all players from this match
+        match.team1.forEach(playerId => {
+            if (selectedPlayerIds.includes(playerId)) {
+                playHistory[round].add(playerId);
+                lastPlayRound[playerId] = Math.max(lastPlayRound[playerId] || 0, round);
+            }
+        });
+        match.team2.forEach(playerId => {
+            if (selectedPlayerIds.includes(playerId)) {
+                playHistory[round].add(playerId);
+                lastPlayRound[playerId] = Math.max(lastPlayRound[playerId] || 0, round);
+            }
+        });
+    });
+    
+    return { playHistory, lastPlayRound };
+}
+
+// Helper function to calculate which players need to play based on frequency
+function getPlayersWhoNeedToPlay(selectedPlayerIds, matchType, maxCourts, currentRound, lastPlayRound) {
+    const playersWhoNeedToPlay = new Set();
+    
+    // Calculate play frequency: p / (c * players_per_court)
+    // For singles: players_per_court = 2
+    // For doubles: players_per_court = 4 (2 teams of 2)
+    const playersPerCourt = matchType === 'singles' ? 2 : 4;
+    const playFrequency = selectedPlayerIds.length / (maxCourts * playersPerCourt);
+    const roundsBetweenPlays = Math.ceil(playFrequency);
+    
+    selectedPlayerIds.forEach(playerId => {
+        const roundsSinceLastPlay = currentRound - (lastPlayRound[playerId] || 0);
+        if (roundsSinceLastPlay >= roundsBetweenPlays) {
+            playersWhoNeedToPlay.add(playerId);
+        }
+    });
+    
+    return playersWhoNeedToPlay;
+}
+
 function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
     const newMatches = [];
     const baseTime = Date.now();
@@ -573,15 +635,40 @@ function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
     
     // Track which players played in the previous round
     let playersWhoDidNotPlay = new Set(selectedPlayerIds);
+    // Track play history within this generation session (round -> Set of playerIds)
+    const sessionPlayHistory = {};
     
     for (let round = startRound; round < startRound + numRounds; round++) {
+        // Get play history to determine which players need to play
+        // Combine existing play history with session play history
+        const { lastPlayRound: existingLastPlayRound } = getPlayHistoryByRound(selectedPlayerIds, 'singles', round);
+        const lastPlayRound = { ...existingLastPlayRound };
+        
+        // Update with session play history (rounds generated earlier in this session)
+        selectedPlayerIds.forEach(playerId => {
+            for (let r = startRound; r < round; r++) {
+                if (sessionPlayHistory[r] && sessionPlayHistory[r].has(playerId)) {
+                    lastPlayRound[playerId] = Math.max(lastPlayRound[playerId] || 0, r);
+                }
+            }
+        });
+        
+        const playersWhoNeedToPlay = getPlayersWhoNeedToPlay(
+            selectedPlayerIds, 
+            'singles', 
+            maxCourts, 
+            round, 
+            lastPlayRound
+        );
+        
         // Calculate pairings for this round, prioritizing players who didn't play in the previous round
         // Limit to maxCourts matches per round
         const roundPairings = minimizeRepeatedOpponentsMultiRound(
             selectedPlayerIds, 
             sessionOpponents,
             playersWhoDidNotPlay,
-            maxCourts
+            maxCourts,
+            playersWhoNeedToPlay
         );
         
         if (roundPairings.length === 0 && selectedPlayerIds.length >= 2) {
@@ -593,6 +680,9 @@ function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
         
         // Track which players are playing in this round
         const playersWhoPlayedThisRound = new Set();
+        
+        // Store play history for this round in session
+        sessionPlayHistory[round] = new Set();
         
         roundPairings.forEach(([player1, player2]) => {
             // Ensure sessionOpponents Sets exist
@@ -606,6 +696,8 @@ function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
             // Mark players as having played this round
             playersWhoPlayedThisRound.add(player1);
             playersWhoPlayedThisRound.add(player2);
+            sessionPlayHistory[round].add(player1);
+            sessionPlayHistory[round].add(player2);
             
             newMatches.push({
                 id: `match-${baseTime}-${matchIndex++}`,
@@ -651,15 +743,40 @@ function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
     
     // Track which players played in the previous round
     let playersWhoDidNotPlay = new Set(selectedPlayerIds);
+    // Track play history within this generation session (round -> Set of playerIds)
+    const sessionPlayHistory = {};
     
     for (let round = startRound; round < startRound + numRounds; round++) {
+        // Get play history to determine which players need to play
+        // Combine existing play history with session play history
+        const { lastPlayRound: existingLastPlayRound } = getPlayHistoryByRound(selectedPlayerIds, 'doubles', round);
+        const lastPlayRound = { ...existingLastPlayRound };
+        
+        // Update with session play history (rounds generated earlier in this session)
+        selectedPlayerIds.forEach(playerId => {
+            for (let r = startRound; r < round; r++) {
+                if (sessionPlayHistory[r] && sessionPlayHistory[r].has(playerId)) {
+                    lastPlayRound[playerId] = Math.max(lastPlayRound[playerId] || 0, r);
+                }
+            }
+        });
+        
+        const playersWhoNeedToPlay = getPlayersWhoNeedToPlay(
+            selectedPlayerIds, 
+            'doubles', 
+            maxCourts, 
+            round, 
+            lastPlayRound
+        );
+        
         // Calculate pairings for this round, prioritizing players who didn't play in the previous round
         // Limit to maxCourts matches per round
         const roundPairings = minimizeRepeatedPartnersMultiRound(
             selectedPlayerIds, 
             sessionPartners,
             playersWhoDidNotPlay,
-            maxCourts
+            maxCourts,
+            playersWhoNeedToPlay
         );
         
         if (roundPairings.length === 0 && selectedPlayerIds.length >= 4) {
@@ -677,6 +794,9 @@ function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
         // Track which players are playing in this round
         const playersWhoPlayedThisRound = new Set();
         
+        // Store play history for this round in session
+        sessionPlayHistory[round] = new Set();
+        
         roundPairings.forEach(([team1, team2]) => {
             // Ensure sessionPartners Sets exist
             team1.forEach(playerId => {
@@ -693,8 +813,14 @@ function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
             sessionPartners[team2[1]].add(team2[0]);
             
             // Mark players as having played this round
-            team1.forEach(playerId => playersWhoPlayedThisRound.add(playerId));
-            team2.forEach(playerId => playersWhoPlayedThisRound.add(playerId));
+            team1.forEach(playerId => {
+                playersWhoPlayedThisRound.add(playerId);
+                sessionPlayHistory[round].add(playerId);
+            });
+            team2.forEach(playerId => {
+                playersWhoPlayedThisRound.add(playerId);
+                sessionPlayHistory[round].add(playerId);
+            });
             
             newMatches.push({
                 id: `match-${baseTime}-${matchIndex++}`,
@@ -724,22 +850,124 @@ function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
     matches.push(...newMatches);
 }
 
+// Helper function to get the last N opponents from match history for a player
+function getRecentOpponents(playerId, matchType, count = 2) {
+    const recentOpponents = [];
+    
+    // Get all matches involving this player, sorted by completion date (most recent first)
+    const playerMatches = matchHistory
+        .filter(match => {
+            if (match.type !== matchType) return false;
+            // Check if player is in team1 or team2
+            const inTeam1 = match.team1.includes(playerId);
+            const inTeam2 = match.team2.includes(playerId);
+            return inTeam1 || inTeam2;
+        })
+        .sort((a, b) => {
+            // Sort by completedAt timestamp, most recent first
+            const dateA = new Date(a.completedAt || 0);
+            const dateB = new Date(b.completedAt || 0);
+            return dateB - dateA;
+        });
+    
+    // Extract opponents from the most recent matches
+    for (const match of playerMatches) {
+        if (recentOpponents.length >= count) break;
+        
+        if (matchType === 'singles') {
+            // For singles, the opponent is the other player
+            const opponent = match.team1[0] === playerId ? match.team2[0] : match.team1[0];
+            if (opponent && !recentOpponents.includes(opponent)) {
+                recentOpponents.push(opponent);
+            }
+        } else {
+            // For doubles, opponents are the players in the other team
+            const isInTeam1 = match.team1.includes(playerId);
+            const opponents = isInTeam1 ? match.team2 : match.team1;
+            for (const opponentId of opponents) {
+                if (recentOpponents.length >= count) break;
+                if (!recentOpponents.includes(opponentId)) {
+                    recentOpponents.push(opponentId);
+                }
+            }
+        }
+    }
+    
+    return recentOpponents;
+}
+
+// Helper function to get the last N partners from match history for a player (doubles)
+function getRecentPartners(playerId, count = 2) {
+    const recentPartners = [];
+    
+    // Get all doubles matches involving this player, sorted by completion date (most recent first)
+    const playerMatches = matchHistory
+        .filter(match => {
+            if (match.type !== 'doubles') return false;
+            // Check if player is in team1 or team2
+            const inTeam1 = match.team1.includes(playerId);
+            const inTeam2 = match.team2.includes(playerId);
+            return inTeam1 || inTeam2;
+        })
+        .sort((a, b) => {
+            // Sort by completedAt timestamp, most recent first
+            const dateA = new Date(a.completedAt || 0);
+            const dateB = new Date(b.completedAt || 0);
+            return dateB - dateA;
+        });
+    
+    // Extract partners from the most recent matches
+    for (const match of playerMatches) {
+        if (recentPartners.length >= count) break;
+        
+        // For doubles, partners are on the same team
+        const isInTeam1 = match.team1.includes(playerId);
+        const partners = isInTeam1 ? match.team1 : match.team2;
+        for (const partnerId of partners) {
+            if (partnerId !== playerId && !recentPartners.includes(partnerId)) {
+                recentPartners.push(partnerId);
+                if (recentPartners.length >= count) break;
+            }
+        }
+    }
+    
+    return recentPartners;
+}
+
+// Helper function to shuffle array (Fisher-Yates algorithm)
+function shuffleArray(array) {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+}
+
 // Algorithm to minimize repeated opponents (singles) - multi-round version
-function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, playersWhoDidNotPlay = new Set(), maxCourts = Infinity) {
+function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, playersWhoDidNotPlay = new Set(), maxCourts = Infinity, playersWhoNeedToPlay = new Set()) {
     if (playerIds.length < 2) return [];
+    
+    // Add randomness: shuffle player list before processing to break deterministic ordering
+    const shuffledPlayerIds = shuffleArray(playerIds);
     
     const pairings = [];
     const opponentCounts = {}; // Track how many times each player has faced each opponent (from history)
     const sessionCounts = {}; // Track opponents in this session
+    const recentOpponents = {}; // Track last 2 opponents from match history
     
-    // Initialize opponent counts from history - only for selected players
-    playerIds.forEach(playerId => {
+    // Initialize opponent counts from history and get recent opponents
+    shuffledPlayerIds.forEach(playerId => {
         const player = players.find(p => p.id === playerId);
+        
+        // Get last 2 opponents from match history
+        recentOpponents[playerId] = getRecentOpponents(playerId, 'singles', 2);
+        
         if (!player) {
             // Player not found - initialize empty counts
             opponentCounts[playerId] = {};
             sessionCounts[playerId] = {};
-            playerIds.forEach(opponentId => {
+            shuffledPlayerIds.forEach(opponentId => {
                 if (opponentId !== playerId) {
                     opponentCounts[playerId][opponentId] = 0;
                     sessionCounts[playerId][opponentId] = 0;
@@ -752,7 +980,7 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
         sessionCounts[playerId] = {};
         
         // Check history against all selected players
-        playerIds.forEach(opponentId => {
+        shuffledPlayerIds.forEach(opponentId => {
             if (opponentId !== playerId) {
                 // Count from history (opponents array contains IDs of opponents faced)
                 opponentCounts[playerId][opponentId] = 
@@ -766,15 +994,45 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
         });
     });
     
-    // Create all possible pairs from selected players only
+    // Get player ratings for skill-based matching
+    const playerRatings = {};
+    shuffledPlayerIds.forEach(playerId => {
+        const player = players.find(p => p.id === playerId);
+        playerRatings[playerId] = player ? player.rating : ELO_CONFIG.INITIAL_RATING;
+    });
+    
+    // Create all possible pairs from selected players only (use shuffled list for randomness)
     const possiblePairs = [];
-    for (let i = 0; i < playerIds.length; i++) {
-        for (let j = i + 1; j < playerIds.length; j++) {
-            const player1 = playerIds[i];
-            const player2 = playerIds[j];
+    for (let i = 0; i < shuffledPlayerIds.length; i++) {
+        for (let j = i + 1; j < shuffledPlayerIds.length; j++) {
+            const player1 = shuffledPlayerIds[i];
+            const player2 = shuffledPlayerIds[j];
+            
+            // Skill-based filtering: Prefer pairs with rating gap <= 250
+            // But allow larger gaps if either player needs to play (to guarantee play frequency)
+            const rating1 = playerRatings[player1];
+            const rating2 = playerRatings[player2];
+            const ratingGap = Math.abs(rating1 - rating2);
+            const player1NeedsToPlay = playersWhoNeedToPlay.has(player1);
+            const player2NeedsToPlay = playersWhoNeedToPlay.has(player2);
+            const eitherNeedsToPlay = player1NeedsToPlay || player2NeedsToPlay;
+            
+            // Skip pairs with rating gap > 250 only if neither player needs to play
+            // If a player needs to play, allow any rating gap (but still prefer smaller gaps via priority score)
+            if (ratingGap > 250 && !eitherNeedsToPlay) {
+                continue; // Skip this pair - skill gap too large and no player needs to play
+            }
+            
             // Prioritize pairs that haven't been matched in this session
             const sessionRepeat = (sessionCounts[player1] && sessionCounts[player1][player2]) || 0;
             const historyRepeat = (opponentCounts[player1] && opponentCounts[player1][player2]) || 0;
+            
+            // Check if this opponent is in the last 2 recent opponents
+            const player1RecentOpponents = recentOpponents[player1] || [];
+            const player2RecentOpponents = recentOpponents[player2] || [];
+            const isRecentOpponent1 = player1RecentOpponents.includes(player2);
+            const isRecentOpponent2 = player2RecentOpponents.includes(player1);
+            const isRecentRepeat = isRecentOpponent1 || isRecentOpponent2;
             
             // Check if either player didn't play in the previous round
             const player1DidNotPlay = playersWhoDidNotPlay.has(player1);
@@ -783,10 +1041,30 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
             
             // Calculate priority score:
             // - Lower is better
-            // - Session repeats are heavily penalized (multiply by 10000)
+            // - Session repeats are heavily penalized (multiply by 100000)
+            // - Recent opponents (last 2) are heavily penalized (multiply by 50000)
+            // - Rating difference adds penalty (multiply by 1, so smaller gap = better)
+            //   But if rating gap > 250, add extra penalty (multiply by 10) to strongly prefer smaller gaps
+            // - Players who need to play get high priority boost (subtract 5000) to ensure they play
             // - Players who didn't play get priority boost (subtract 1000)
             // - History repeats add small penalty
-            let priorityScore = sessionRepeat * 10000 + historyRepeat;
+            // - Add small random component (0-100) to break ties and add randomness
+            const randomFactor = Math.random() * 100;
+            let ratingPenalty = ratingGap;
+            if (ratingGap > 250) {
+                ratingPenalty = 250 + (ratingGap - 250) * 10; // Heavily penalize gaps > 250, but still allow them
+            }
+            let priorityScore = sessionRepeat * 100000 + (isRecentRepeat ? 50000 : 0) + historyRepeat * 10 + ratingPenalty + randomFactor;
+            
+            // Boost priority for players who need to play (very high priority)
+            if (eitherNeedsToPlay) {
+                priorityScore -= 5000; // High priority boost to ensure players who need to play get matches
+                // If both need to play, give even higher priority
+                if (player1NeedsToPlay && player2NeedsToPlay) {
+                    priorityScore -= 2500;
+                }
+            }
+            
             if (includesPlayerWhoDidNotPlay) {
                 priorityScore -= 1000; // Boost priority for players who didn't play
                 // If both didn't play, give even higher priority
@@ -799,6 +1077,9 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
                 pair: [player1, player2],
                 repeatScore: sessionRepeat * 1000 + historyRepeat,
                 sessionRepeat: sessionRepeat,
+                isRecentRepeat: isRecentRepeat,
+                ratingGap: ratingGap,
+                eitherNeedsToPlay: eitherNeedsToPlay,
                 priorityScore: priorityScore,
                 includesPlayerWhoDidNotPlay: includesPlayerWhoDidNotPlay,
                 player1DidNotPlay: player1DidNotPlay,
@@ -812,13 +1093,26 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
         return [];
     }
     
-    // Sort by priority score (lower is better) - this prioritizes players who didn't play
+    // Sort by priority score (lower is better) - this prioritizes players who didn't play and similar ratings
+    // The randomFactor in priorityScore ensures we get different results each time
     possiblePairs.sort((a, b) => {
         if (a.priorityScore !== b.priorityScore) {
             return a.priorityScore - b.priorityScore;
         }
-        // If same priority, prefer pairs that haven't been matched in this session
-        return a.sessionRepeat - b.sessionRepeat;
+        // If same priority (unlikely due to randomFactor), prefer pairs with smaller rating gap
+        if (a.ratingGap !== b.ratingGap) {
+            return a.ratingGap - b.ratingGap;
+        }
+        // If same rating gap, prefer pairs without session repeats
+        if (a.sessionRepeat !== b.sessionRepeat) {
+            return a.sessionRepeat - b.sessionRepeat;
+        }
+        // If still same, prefer pairs without recent repeats
+        if (a.isRecentRepeat !== b.isRecentRepeat) {
+            return a.isRecentRepeat ? 1 : -1;
+        }
+        // If everything is the same, maintain stable order (randomFactor should prevent this)
+        return 0;
     });
     
     // First, ensure all players who didn't play get a match (if possible)
@@ -827,12 +1121,14 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
     
     // Prioritize matches for players who didn't play in previous round
     if (playersWhoDidNotPlayArray.length > 0) {
-        // Try to pair players who didn't play with each other first
+        // Try to pair players who need to play or didn't play with each other first
+        // Avoid session repeats and recent repeats when possible
+        // But prioritize players who need to play even if it means session/recent repeats
         const priorityPairs = possiblePairs.filter(p => 
-            p.includesPlayerWhoDidNotPlay && 
+            (p.eitherNeedsToPlay || p.includesPlayerWhoDidNotPlay) &&
             !usedPlayers.has(p.pair[0]) && 
             !usedPlayers.has(p.pair[1]) &&
-            p.sessionRepeat === 0 // Prefer no session repeats when possible
+            (p.eitherNeedsToPlay || (p.sessionRepeat === 0 && !p.isRecentRepeat)) // For players who need to play, allow repeats if necessary
         );
         
         for (const { pair } of priorityPairs) {
@@ -874,15 +1170,16 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
         }
     }
     
-    // Now fill in remaining players, avoiding session repeats when possible
+    // Now fill in remaining players, avoiding session repeats and recent repeats when possible
     // Only if we haven't reached the court limit
     if (pairings.length < maxCourts) {
-        for (const { pair, sessionRepeat } of possiblePairs) {
+        for (const { pair, sessionRepeat, isRecentRepeat } of possiblePairs) {
             // Stop if we've reached the court limit
             if (pairings.length >= maxCourts) break;
             
-            // Skip if already used or if it's a session repeat (when we can avoid it)
+            // Skip if already used, if it's a session repeat, or if it's a recent repeat (when we can avoid it)
             if (sessionRepeat > 0) continue;
+            if (isRecentRepeat) continue; // Avoid recent repeats when possible
             if (usedPlayers.has(pair[0]) || usedPlayers.has(pair[1])) continue;
             
             pairings.push(pair);
@@ -894,26 +1191,56 @@ function minimizeRepeatedOpponentsMultiRound(playerIds, sessionOpponents, player
     // If we have remaining players, allow some session repeats but minimize them
     // Only if we haven't reached the court limit
     if (pairings.length < maxCourts) {
-        const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
+        const remainingPlayers = shuffledPlayerIds.filter(id => !usedPlayers.has(id));
         if (remainingPlayers.length >= 2) {
             // Get all possible pairs for remaining players, including those with session repeats
+            // Allow larger rating gaps if players need to play
             const remainingPairs = [];
             for (let i = 0; i < remainingPlayers.length; i++) {
                 for (let j = i + 1; j < remainingPlayers.length; j++) {
                     const p1 = remainingPlayers[i];
                     const p2 = remainingPlayers[j];
+                    
+                    const rating1 = playerRatings[p1];
+                    const rating2 = playerRatings[p2];
+                    const ratingGap = Math.abs(rating1 - rating2);
+                    const p1NeedsToPlay = playersWhoNeedToPlay.has(p1);
+                    const p2NeedsToPlay = playersWhoNeedToPlay.has(p2);
+                    const eitherNeedsToPlay = p1NeedsToPlay || p2NeedsToPlay;
+                    
+                    // Skip pairs with rating gap > 250 only if neither player needs to play
+                    if (ratingGap > 250 && !eitherNeedsToPlay) {
+                        continue; // Skip this pair - skill gap too large and no player needs to play
+                    }
+                    
                     const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
                     const historyRepeat = (opponentCounts[p1] && opponentCounts[p1][p2]) || 0;
+                    let ratingPenalty = ratingGap;
+                    if (ratingGap > 250) {
+                        ratingPenalty = 250 + (ratingGap - 250) * 10; // Heavily penalize gaps > 250
+                    }
+                    let repeatScore = sessionRepeat * 1000 + historyRepeat + ratingPenalty;
+                    if (eitherNeedsToPlay) {
+                        repeatScore -= 5000; // High priority for players who need to play
+                    }
                     remainingPairs.push({
                         pair: [p1, p2],
                         sessionRepeat: sessionRepeat,
-                        repeatScore: sessionRepeat * 1000 + historyRepeat
+                        ratingGap: ratingGap,
+                        eitherNeedsToPlay: eitherNeedsToPlay,
+                        repeatScore: repeatScore
                     });
                 }
             }
             
             if (remainingPairs.length > 0) {
-                remainingPairs.sort((a, b) => a.repeatScore - b.repeatScore);
+                // Sort by repeat score (which now includes rating gap) and rating gap
+                remainingPairs.sort((a, b) => {
+                    if (a.repeatScore !== b.repeatScore) {
+                        return a.repeatScore - b.repeatScore;
+                    }
+                    return a.ratingGap - b.ratingGap;
+                });
                 
                 const usedRemaining = new Set();
                 for (const { pair } of remainingPairs) {
@@ -949,25 +1276,32 @@ function minimizeRepeatedOpponents(playerIds) {
     playerIds.forEach(id => {
         emptySessionOpponents[id] = new Set();
     });
-    return minimizeRepeatedOpponentsMultiRound(playerIds, emptySessionOpponents, new Set());
+    return minimizeRepeatedOpponentsMultiRound(playerIds, emptySessionOpponents, new Set(), Infinity, new Set());
 }
 
 // Algorithm to minimize repeated partners (doubles) - multi-round version
-function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersWhoDidNotPlay = new Set(), maxCourts = Infinity) {
+function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersWhoDidNotPlay = new Set(), maxCourts = Infinity, playersWhoNeedToPlay = new Set()) {
     if (playerIds.length < 4) return [];
     
-    const matches = [];
+    // Add randomness: shuffle player list before processing to break deterministic ordering
+    const shuffledPlayerIds = shuffleArray(playerIds);
+    
     const partnerCounts = {}; // Track how many times each player has partnered with each other player (from history)
     const sessionCounts = {}; // Track partners in this session
+    const recentPartners = {}; // Track last 2 partners from match history
     
-    // Initialize partner counts from history - only for selected players
-    playerIds.forEach(playerId => {
+    // Initialize partner counts from history and get recent partners
+    shuffledPlayerIds.forEach(playerId => {
         const player = players.find(p => p.id === playerId);
+        
+        // Get last 2 partners from match history
+        recentPartners[playerId] = getRecentPartners(playerId, 2);
+        
         if (!player) {
             // Player not found - initialize empty counts
             partnerCounts[playerId] = {};
             sessionCounts[playerId] = {};
-            playerIds.forEach(partnerId => {
+            shuffledPlayerIds.forEach(partnerId => {
                 if (partnerId !== playerId) {
                     partnerCounts[playerId][partnerId] = 0;
                     sessionCounts[playerId][partnerId] = 0;
@@ -980,7 +1314,7 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         sessionCounts[playerId] = {};
         
         // Check history against all selected players
-        playerIds.forEach(partnerId => {
+        shuffledPlayerIds.forEach(partnerId => {
             if (partnerId !== playerId) {
                 // Count from history (partners array contains IDs of partners)
                 partnerCounts[playerId][partnerId] = 
@@ -994,27 +1328,68 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         });
     });
     
-    // Create all possible teams of 2 from selected players only
+    // Get player ratings for skill-based matching
+    const playerRatings = {};
+    shuffledPlayerIds.forEach(playerId => {
+        const player = players.find(p => p.id === playerId);
+        playerRatings[playerId] = player ? player.rating : ELO_CONFIG.INITIAL_RATING;
+    });
+    
+    // Create all possible teams of 2 from selected players only (use shuffled list for randomness)
     const possibleTeams = [];
-    for (let i = 0; i < playerIds.length; i++) {
-        for (let j = i + 1; j < playerIds.length; j++) {
-            const team = [playerIds[i], playerIds[j]].sort();
+    for (let i = 0; i < shuffledPlayerIds.length; i++) {
+        for (let j = i + 1; j < shuffledPlayerIds.length; j++) {
+            const team = [shuffledPlayerIds[i], shuffledPlayerIds[j]].sort();
             const p1 = team[0];
             const p2 = team[1];
+            
+            // Calculate team rating statistics
+            const rating1 = playerRatings[p1];
+            const rating2 = playerRatings[p2];
+            const partnerRatingGap = Math.abs(rating1 - rating2); // Prefer smaller gap between partners
+            const teamAverageRating = (rating1 + rating2) / 2; // Used for balancing matches
+            
             const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
             const historyRepeat = (partnerCounts[p1] && partnerCounts[p1][p2]) || 0;
+            
+            // Check if this partner is in the last 2 recent partners
+            const p1RecentPartners = recentPartners[p1] || [];
+            const p2RecentPartners = recentPartners[p2] || [];
+            const isRecentPartner1 = p1RecentPartners.includes(p2);
+            const isRecentPartner2 = p2RecentPartners.includes(p1);
+            const isRecentRepeat = isRecentPartner1 || isRecentPartner2;
             
             // Check if either player didn't play in the previous round
             const player1DidNotPlay = playersWhoDidNotPlay.has(p1);
             const player2DidNotPlay = playersWhoDidNotPlay.has(p2);
             const includesPlayerWhoDidNotPlay = player1DidNotPlay || player2DidNotPlay;
             
+            // Check if either player needs to play (based on play frequency)
+            const player1NeedsToPlay = playersWhoNeedToPlay.has(p1);
+            const player2NeedsToPlay = playersWhoNeedToPlay.has(p2);
+            const eitherNeedsToPlay = player1NeedsToPlay || player2NeedsToPlay;
+            
             // Calculate priority score:
             // - Lower is better
-            // - Session repeats are heavily penalized (multiply by 10000)
+            // - Session repeats are heavily penalized (multiply by 100000)
+            // - Recent partners (last 2) are heavily penalized (multiply by 50000)
+            // - Partner rating gap adds small penalty (multiply by 0.5, so similar partners preferred but not required)
+            // - Players who need to play get high priority boost (subtract 5000) to ensure they play
             // - Players who didn't play get priority boost (subtract 1000)
             // - History repeats add small penalty
-            let priorityScore = sessionRepeat * 10000 + historyRepeat;
+            // - Add small random component (0-100) to break ties and add randomness
+            const randomFactor = Math.random() * 100;
+            let priorityScore = sessionRepeat * 100000 + (isRecentRepeat ? 50000 : 0) + historyRepeat * 10 + partnerRatingGap * 0.5 + randomFactor;
+            
+            // Boost priority for players who need to play (very high priority)
+            if (eitherNeedsToPlay) {
+                priorityScore -= 5000; // High priority boost to ensure players who need to play get matches
+                // If both need to play, give even higher priority
+                if (player1NeedsToPlay && player2NeedsToPlay) {
+                    priorityScore -= 2500;
+                }
+            }
+            
             if (includesPlayerWhoDidNotPlay) {
                 priorityScore -= 1000; // Boost priority for players who didn't play
                 // If both didn't play, give even higher priority
@@ -1027,6 +1402,10 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
                 team: team,
                 repeatScore: sessionRepeat * 1000 + historyRepeat,
                 sessionRepeat: sessionRepeat,
+                isRecentRepeat: isRecentRepeat,
+                partnerRatingGap: partnerRatingGap,
+                teamAverageRating: teamAverageRating,
+                eitherNeedsToPlay: eitherNeedsToPlay,
                 priorityScore: priorityScore,
                 includesPlayerWhoDidNotPlay: includesPlayerWhoDidNotPlay,
                 player1DidNotPlay: player1DidNotPlay,
@@ -1040,15 +1419,26 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         return [];
     }
     
-    // Sort by priority score (lower is better) - this prioritizes teams with players who didn't play
+    // Sort by priority score (lower is better) - this prioritizes teams with players who didn't play and similar partner ratings
+    // The randomFactor in priorityScore ensures we get different results each time
     possibleTeams.sort((a, b) => {
         if (a.priorityScore !== b.priorityScore) {
             return a.priorityScore - b.priorityScore;
         }
+        // If same priority (unlikely due to randomFactor), prefer teams with smaller partner rating gap
+        if (a.partnerRatingGap !== b.partnerRatingGap) {
+            return a.partnerRatingGap - b.partnerRatingGap;
+        }
+        // If same rating gap, prefer teams without session repeats
         if (a.sessionRepeat !== b.sessionRepeat) {
             return a.sessionRepeat - b.sessionRepeat;
         }
-        return a.team[0].localeCompare(b.team[0]);
+        // If still same, prefer teams without recent repeats
+        if (a.isRecentRepeat !== b.isRecentRepeat) {
+            return a.isRecentRepeat ? 1 : -1;
+        }
+        // If everything is the same, maintain stable order (randomFactor should prevent this)
+        return 0;
     });
     
     // Greedily select teams to maximize matches while minimizing partner repeats
@@ -1059,14 +1449,16 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
     const selectedTeams = [];
     const playersWhoDidNotPlayArray = Array.from(playersWhoDidNotPlay);
     
-    // First pass: prioritize teams with players who didn't play, avoiding session repeats
-    if (playersWhoDidNotPlayArray.length > 0 && selectedTeams.length < maxTeamsNeeded) {
-        // Try to create teams that include players who didn't play
+    // First pass: prioritize teams with players who need to play or didn't play, avoiding session repeats and recent repeats when possible
+    const playersWhoNeedToPlayArray = Array.from(playersWhoNeedToPlay);
+    if ((playersWhoNeedToPlayArray.length > 0 || playersWhoDidNotPlayArray.length > 0) && selectedTeams.length < maxTeamsNeeded) {
+        // Try to create teams that include players who need to play or didn't play
+        // For players who need to play, allow repeats if necessary to ensure they play
         const priorityTeams = possibleTeams.filter(t => 
-            t.includesPlayerWhoDidNotPlay && 
+            (t.eitherNeedsToPlay || t.includesPlayerWhoDidNotPlay) &&
             !usedPlayers.has(t.team[0]) && 
             !usedPlayers.has(t.team[1]) &&
-            t.sessionRepeat === 0 // Prefer no session repeats when possible
+            (t.eitherNeedsToPlay || (t.sessionRepeat === 0 && !t.isRecentRepeat)) // For players who need to play, allow repeats if necessary
         );
         
         for (const teamData of priorityTeams) {
@@ -1078,11 +1470,15 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
             }
         }
         
-        // If some players who didn't play still aren't in a team, create teams for them
+        // If some players who need to play or didn't play still aren't in a team, create teams for them
         if (selectedTeams.length < maxTeamsNeeded) {
-            const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id));
-            if (stillUnmatched.length > 0) {
-                for (const unmatchedPlayerId of stillUnmatched) {
+            // Prioritize players who need to play first
+            const stillUnmatchedNeedingToPlay = playersWhoNeedToPlayArray.filter(id => !usedPlayers.has(id));
+            const stillUnmatched = playersWhoDidNotPlayArray.filter(id => !usedPlayers.has(id) && !stillUnmatchedNeedingToPlay.includes(id));
+            const allStillUnmatched = [...stillUnmatchedNeedingToPlay, ...stillUnmatched];
+            
+            if (allStillUnmatched.length > 0) {
+                for (const unmatchedPlayerId of allStillUnmatched) {
                     if (selectedTeams.length >= maxTeamsNeeded) break;
                     
                     // Find the best available partner for this player
@@ -1105,12 +1501,18 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
         }
     }
     
-    // Second pass: fill in remaining teams with no session repeats
+    // Second pass: fill in remaining teams with no session repeats and no recent repeats
+    // But allow teams with players who need to play even if they have repeats
     if (selectedTeams.length < maxTeamsNeeded) {
         for (const teamData of possibleTeams) {
             if (selectedTeams.length >= maxTeamsNeeded) break;
-            if (teamData.sessionRepeat > 0) continue; // Skip teams that already partnered in this session
             if (usedPlayers.has(teamData.team[0]) || usedPlayers.has(teamData.team[1])) continue;
+            
+            // Skip teams with session/recent repeats UNLESS they have players who need to play
+            if (!teamData.eitherNeedsToPlay) {
+                if (teamData.sessionRepeat > 0) continue; // Skip teams that already partnered in this session
+                if (teamData.isRecentRepeat) continue; // Skip recent repeats when possible
+            }
             
             selectedTeams.push(teamData.team);
             usedPlayers.add(teamData.team[0]);
@@ -1120,7 +1522,7 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
     
     // If we need more teams, allow some session repeats but minimize them
     if (selectedTeams.length < maxTeamsNeeded) {
-        const remainingPlayers = playerIds.filter(id => !usedPlayers.has(id));
+        const remainingPlayers = shuffledPlayerIds.filter(id => !usedPlayers.has(id));
         if (remainingPlayers.length >= 2) {
             const remainingTeams = [];
             for (let i = 0; i < remainingPlayers.length; i++) {
@@ -1128,18 +1530,36 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
                     const team = [remainingPlayers[i], remainingPlayers[j]].sort();
                     const p1 = team[0];
                     const p2 = team[1];
+                    const rating1 = playerRatings[p1];
+                    const rating2 = playerRatings[p2];
+                    const partnerRatingGap = Math.abs(rating1 - rating2);
+                    const p1NeedsToPlay = playersWhoNeedToPlay.has(p1);
+                    const p2NeedsToPlay = playersWhoNeedToPlay.has(p2);
+                    const eitherNeedsToPlay = p1NeedsToPlay || p2NeedsToPlay;
                     const sessionRepeat = (sessionCounts[p1] && sessionCounts[p1][p2]) || 0;
                     const historyRepeat = (partnerCounts[p1] && partnerCounts[p1][p2]) || 0;
+                    let repeatScore = sessionRepeat * 1000 + historyRepeat + partnerRatingGap * 0.5;
+                    if (eitherNeedsToPlay) {
+                        repeatScore -= 5000; // High priority for players who need to play
+                    }
                     remainingTeams.push({
                         team: team,
                         sessionRepeat: sessionRepeat,
-                        repeatScore: sessionRepeat * 1000 + historyRepeat
+                        partnerRatingGap: partnerRatingGap,
+                        eitherNeedsToPlay: eitherNeedsToPlay,
+                        repeatScore: repeatScore
                     });
                 }
             }
             
             if (remainingTeams.length > 0) {
-                remainingTeams.sort((a, b) => a.repeatScore - b.repeatScore);
+                // Sort by repeat score (which includes partner rating gap) and partner rating gap
+                remainingTeams.sort((a, b) => {
+                    if (a.repeatScore !== b.repeatScore) {
+                        return a.repeatScore - b.repeatScore;
+                    }
+                    return a.partnerRatingGap - b.partnerRatingGap;
+                });
                 
                 const usedRemaining = new Set();
                 for (const teamData of remainingTeams) {
@@ -1156,28 +1576,99 @@ function minimizeRepeatedPartnersMultiRound(playerIds, sessionPartners, playersW
     }
     
     // Create matches from selected teams (pair teams into matches)
-    // We've already limited teams to maxCourts * 2, so we can pair them directly
-    for (let i = 0; i < selectedTeams.length; i += 2) {
-        if (i + 1 < selectedTeams.length) {
-            matches.push([selectedTeams[i], selectedTeams[i + 1]]);
-            // Stop if we've reached the court limit (safety check)
-            if (matches.length >= maxCourts) break;
+    // Balance teams by average rating to create fair matches
+    // Convert selectedTeams to team data objects with rating information
+    const selectedTeamData = selectedTeams.map(team => {
+        const teamObj = possibleTeams.find(t => 
+            t.team[0] === team[0] && t.team[1] === team[1]
+        );
+        if (teamObj) {
+            return teamObj;
+        }
+        // Fallback if team not found in possibleTeams (shouldn't happen)
+        const rating1 = playerRatings[team[0]];
+        const rating2 = playerRatings[team[1]];
+        return {
+            team: team,
+            teamAverageRating: (rating1 + rating2) / 2,
+            eitherNeedsToPlay: playersWhoNeedToPlay.has(team[0]) || playersWhoNeedToPlay.has(team[1])
+        };
+    });
+    
+    // Sort teams: first by whether they have players who need to play, then by average rating
+    selectedTeamData.sort((a, b) => {
+        // Teams with players who need to play come first
+        if (a.eitherNeedsToPlay !== b.eitherNeedsToPlay) {
+            return a.eitherNeedsToPlay ? -1 : 1;
+        }
+        // Then sort by average rating
+        return a.teamAverageRating - b.teamAverageRating;
+    });
+    
+    // Greedily pair teams with similar average ratings, prioritizing teams with players who need to play
+    const usedTeamIndices = new Set();
+    const finalMatches = [];
+    
+    for (let i = 0; i < selectedTeamData.length && finalMatches.length < maxCourts; i++) {
+        if (usedTeamIndices.has(i)) continue;
+        
+        let bestMatchIndex = -1;
+        let bestScore = Infinity;
+        
+        // Find the best matching team
+        for (let j = i + 1; j < selectedTeamData.length; j++) {
+            if (usedTeamIndices.has(j)) continue;
+            
+            const ratingDiff = Math.abs(selectedTeamData[i].teamAverageRating - selectedTeamData[j].teamAverageRating);
+            
+            // Calculate match score: lower is better
+            // Prefer matches with similar ratings, but prioritize matching teams with players who need to play
+            let matchScore = ratingDiff;
+            
+            // If either team has players who need to play, boost priority
+            if (selectedTeamData[i].eitherNeedsToPlay || selectedTeamData[j].eitherNeedsToPlay) {
+                matchScore -= 1000; // Boost priority for teams with players who need to play
+            }
+            
+            if (matchScore < bestScore) {
+                bestScore = matchScore;
+                bestMatchIndex = j;
+            }
+        }
+        
+        if (bestMatchIndex !== -1) {
+            finalMatches.push([selectedTeamData[i].team, selectedTeamData[bestMatchIndex].team]);
+            usedTeamIndices.add(i);
+            usedTeamIndices.add(bestMatchIndex);
+        } else {
+            // If no match found, try to pair with any available team
+            for (let j = i + 1; j < selectedTeamData.length; j++) {
+                if (!usedTeamIndices.has(j)) {
+                    finalMatches.push([selectedTeamData[i].team, selectedTeamData[j].team]);
+                    usedTeamIndices.add(i);
+                    usedTeamIndices.add(j);
+                    break;
+                }
+            }
         }
     }
     
+    // Use finalMatches as the result
+    let resultMatches = finalMatches;
+    
     // If we still have no matches and we have enough players, create at least one match
     // This can happen if we have an odd number of teams or other edge cases
-    if (matches.length === 0 && selectedTeams.length >= 2) {
+    if (resultMatches.length === 0 && selectedTeamData.length >= 2) {
         // Create matches from available teams, even if odd number
-        matches.push([selectedTeams[0], selectedTeams[1]]);
-    } else if (matches.length === 0 && possibleTeams.length >= 2) {
+        resultMatches.push([selectedTeamData[0].team, selectedTeamData[1].team]);
+    } else if (resultMatches.length === 0 && possibleTeams.length >= 2) {
         // Fallback: create at least one match from the best available teams
         const bestTeams = possibleTeams.slice(0, 2);
-        matches.push([bestTeams[0].team, bestTeams[1].team]);
+        resultMatches.push([bestTeams[0].team, bestTeams[1].team]);
     }
     
     // Ensure we don't exceed maxCourts (shouldn't happen, but safety check)
-    return matches.slice(0, maxCourts);
+    return resultMatches.slice(0, maxCourts);
 }
 
 // Legacy function for backward compatibility
@@ -1186,7 +1677,7 @@ function minimizeRepeatedPartners(playerIds) {
     playerIds.forEach(id => {
         emptySessionPartners[id] = new Set();
     });
-    return minimizeRepeatedPartnersMultiRound(playerIds, emptySessionPartners, new Set());
+    return minimizeRepeatedPartnersMultiRound(playerIds, emptySessionPartners, new Set(), Infinity, new Set());
 }
 
 function clearMatches() {
@@ -1260,13 +1751,35 @@ function renderMatches() {
         return parseInt(a) - parseInt(b);
     });
     
+    // Calculate sitting out players for each round
+    const getSittingOutPlayers = (roundMatches) => {
+        // Get all players playing in this round
+        const playingPlayers = new Set();
+        roundMatches.forEach(match => {
+            match.team1.forEach(playerId => playingPlayers.add(playerId));
+            match.team2.forEach(playerId => playingPlayers.add(playerId));
+        });
+        
+        // Get all event players
+        const eventPlayerSet = new Set(eventPlayers);
+        
+        // Find players who are in the event but not playing
+        const sittingOut = eventPlayers.filter(playerId => !playingPlayers.has(playerId));
+        
+        return sittingOut.map(playerId => {
+            return getPlayerNameWithRating(playerId);
+        }).filter(name => name !== 'Unknown');
+    };
+    
     matchesList.innerHTML = rounds.map(round => {
         const roundMatches = matchesByRound[round];
+        const sittingOutPlayers = getSittingOutPlayers(roundMatches);
+        
         const roundHeader = round !== 'Unspecified' ? `<h3 style="margin-top: 20px; margin-bottom: 10px; color: #667eea;">Round ${round}</h3>` : '';
         
         const matchesHtml = roundMatches.map(match => {
-            const team1Players = match.team1.map(id => getPlayerName(id)).join(' & ');
-            const team2Players = match.team2.map(id => getPlayerName(id)).join(' & ');
+            const team1Players = match.team1.map(id => getPlayerNameWithRating(id)).join(' & ');
+            const team2Players = match.team2.map(id => getPlayerNameWithRating(id)).join(' & ');
             
             return `
                 <div class="match-card ${match.type}">
@@ -1289,7 +1802,17 @@ function renderMatches() {
             `;
         }).join('');
         
-        return roundHeader + matchesHtml;
+        // Create sitting out players list HTML
+        const sittingOutHtml = sittingOutPlayers.length > 0 
+            ? `<div class="sitting-out-container">
+                <h4 style="margin: 0 0 10px 0; color: #666; font-size: 0.95em; font-weight: 600;">Sitting Out:</h4>
+                <ul class="sitting-out-list">
+                    ${sittingOutPlayers.map(playerName => `<li>${escapeHtml(playerName)}</li>`).join('')}
+                </ul>
+               </div>`
+            : '<div class="sitting-out-container"><p style="margin: 0; color: #28a745; font-size: 0.9em; font-weight: 500;">✓ All players are playing</p></div>';
+        
+        return `<div class="round-container">${roundHeader}<div class="round-content"><div class="matches-container">${matchesHtml}</div>${sittingOutHtml}</div></div>`;
     }).join('');
 }
 
@@ -1557,6 +2080,12 @@ function renderHistory() {
 function getPlayerName(playerId) {
     const player = players.find(p => p.id === playerId);
     return player ? player.name : 'Unknown';
+}
+
+function getPlayerNameWithRating(playerId) {
+    const player = players.find(p => p.id === playerId);
+    if (!player) return 'Unknown';
+    return `${player.name} (${Math.round(player.rating)})`;
 }
 
 function escapeHtml(text) {
