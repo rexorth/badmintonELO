@@ -559,11 +559,232 @@ function getMaxRoundNumber() {
 
 
 function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
-    // TODO: Implement matchmaking algorithm for singles matches
+    // Get the starting round number (next round after existing matches)
+    const startRound = getMaxRoundNumber() + 1;
+    
+    // Initialize: empty sitting players and empty past rounds queue
+    const sittingPlayers = [];
+    const pastRounds = []; // Queue of last 3 rounds, oldest at front
+    
+    // Generate rounds recursively
+    for (let roundNum = startRound; roundNum < startRound + numRounds; roundNum++) {
+        const roundMatches = generateSinglesRound(
+            [...selectedPlayerIds], // Copy to avoid mutation
+            roundNum,
+            sittingPlayers,
+            pastRounds,
+            maxCourts
+        );
+        
+        // Update sitting players for next round (players who didn't play this round)
+        const playingThisRound = new Set();
+        roundMatches.forEach(match => {
+            playingThisRound.add(match.team1[0]);
+            playingThisRound.add(match.team2[0]);
+        });
+        
+        // Update sitting players: those who sat out this round
+        sittingPlayers.length = 0; // Clear previous
+        selectedPlayerIds.forEach(playerId => {
+            if (!playingThisRound.has(playerId)) {
+                sittingPlayers.push(playerId);
+            }
+        });
+        
+        // Add this round to pastRounds queue (keep only last 3)
+        pastRounds.push(roundMatches);
+        if (pastRounds.length > 3) {
+            pastRounds.shift(); // Remove oldest round
+        }
+    }
+}
+
+function generateSinglesRound(availablePlayerIds, roundNum, sittingPlayers, pastRounds, maxCourts) {
+    const roundMatches = [];
+    const playersInRound = new Set(); // Track players already matched in this round
+    
+    // Recursive helper to generate matches for this round
+    function generateMatch() {
+        // Base case: not enough players or reached court limit
+        if (availablePlayerIds.length < 2 || roundMatches.length >= maxCourts) {
+            return;
+        }
+        
+        // Step 1: Sort available players by rating (descending)
+        const sortedPlayers = availablePlayerIds
+            .map(id => players.find(p => p.id === id))
+            .filter(p => p !== undefined)
+            .sort((a, b) => b.rating - a.rating)
+            .map(p => p.id);
+        
+        // Step 1.5: Prioritize sitting players if available
+        let currentPlayer;
+        let playerPool = [...sortedPlayers];
+        
+        if (sittingPlayers.length > 0) {
+            // Filter to only sitting players who are still available
+            const availableSittingPlayers = sittingPlayers.filter(id => 
+                sortedPlayers.includes(id) && !playersInRound.has(id)
+            );
+            
+            if (availableSittingPlayers.length > 0) {
+                // Select random sitting player
+                const randomIndex = Math.floor(Math.random() * availableSittingPlayers.length);
+                currentPlayer = availableSittingPlayers[randomIndex];
+            }
+        }
+        
+        // If no sitting player selected, select random from available
+        if (!currentPlayer) {
+            const availableForSelection = sortedPlayers.filter(id => !playersInRound.has(id));
+            if (availableForSelection.length === 0) return;
+            
+            const randomIndex = Math.floor(Math.random() * availableForSelection.length);
+            currentPlayer = availableForSelection[randomIndex];
+        }
+        
+        // Remove currentPlayer from playerPool
+        playerPool = playerPool.filter(id => id !== currentPlayer && !playersInRound.has(id));
+        
+        if (playerPool.length === 0) return; // No opponents available
+        
+        // Step 5: Find past opponents from last 3 rounds
+        const pastOpponents = [];
+        const currentPlayerObj = players.find(p => p.id === currentPlayer);
+        if (!currentPlayerObj) return;
+        
+        // Check each past round (oldest to newest)
+        for (let i = 0; i < pastRounds.length; i++) {
+            const round = pastRounds[i];
+            const roundsAgo = pastRounds.length - i; // 1 = most recent, 3 = oldest
+            
+            round.forEach(match => {
+                // Check if currentPlayer played in this match
+                const playedInMatch = match.team1[0] === currentPlayer || match.team2[0] === currentPlayer;
+                if (playedInMatch) {
+                    // Find opponent
+                    const opponent = match.team1[0] === currentPlayer ? match.team2[0] : match.team1[0];
+                    if (!pastOpponents.find(po => po.id === opponent && po.roundsAgo === roundsAgo)) {
+                        pastOpponents.push({ id: opponent, roundsAgo: roundsAgo });
+                    }
+                }
+            });
+        }
+        
+        // Step 3: Calculate expected scores for each potential opponent
+        const playerPoolWithScores = playerPool.map(opponentId => {
+            const opponent = players.find(p => p.id === opponentId);
+            if (!opponent) return null;
+            
+            // Calculate expected score using ELO formula
+            const expectedScore = 1 / (1 + Math.pow(10, (opponent.rating - currentPlayerObj.rating) / 400));
+            
+            return {
+                id: opponentId,
+                expectedScore: expectedScore
+            };
+        }).filter(item => item !== null);
+        
+        // Step 3.5: Remove most recent opponent from playerPool if pastOpponents exists
+        if (pastOpponents.length > 0) {
+            // Sort pastOpponents by roundsAgo (most recent first)
+            pastOpponents.sort((a, b) => a.roundsAgo - b.roundsAgo);
+            const mostRecentOpponent = pastOpponents[0].id;
+            
+            // Remove from playerPool
+            const indexToRemove = playerPoolWithScores.findIndex(p => p.id === mostRecentOpponent);
+            if (indexToRemove !== -1) {
+                playerPoolWithScores.splice(indexToRemove, 1);
+                pastOpponents.shift(); // Remove from pastOpponents
+            }
+        }
+        
+        if (playerPoolWithScores.length === 0) return; // No valid opponents
+        
+        // Step 4: Calculate probabilities using Gaussian distribution
+        const s = 1 / (2 * Math.PI);
+        const nextPlayerProbability = playerPoolWithScores.map(player => {
+            const x = player.expectedScore;
+            // Gaussian: 1/(s*sqrt(2*pi)) * e^(-((x-0.5)^2)/(2*s^2))
+            const probability = (1 / (s * Math.sqrt(2 * Math.PI))) * 
+                               Math.exp(-Math.pow(x - 0.5, 2) / (2 * s * s));
+            return {
+                id: player.id,
+                probability: probability
+            };
+        });
+        
+        // Step 4.5: Reduce probability for remaining past opponents
+        pastOpponents.forEach(pastOpp => {
+            const playerIndex = nextPlayerProbability.findIndex(p => p.id === pastOpp.id);
+            if (playerIndex !== -1) {
+                // Reduce by (1 - 1/(4^n)) where n is rounds since they last played
+                const reductionFactor = 1 - (1 / Math.pow(4, pastOpp.roundsAgo));
+                nextPlayerProbability[playerIndex].probability *= reductionFactor;
+            }
+        });
+        
+        // Step 7: Sum all probabilities and generate random choice
+        const totalProbability = nextPlayerProbability.reduce((sum, p) => sum + p.probability, 0);
+        if (totalProbability <= 0) return; // Safety check
+        
+        const playerChoice = Math.random() * totalProbability;
+        
+        // Step 8: Select opponent using cumulative sum
+        let cumulativeSum = 0;
+        let selectedOpponent = null;
+        
+        for (let i = 0; i < nextPlayerProbability.length; i++) {
+            cumulativeSum += nextPlayerProbability[i].probability;
+            if (playerChoice <= cumulativeSum) {
+                selectedOpponent = nextPlayerProbability[i].id;
+                break;
+            }
+        }
+        
+        // Fallback: select last player if none selected (shouldn't happen, but safety)
+        if (!selectedOpponent && nextPlayerProbability.length > 0) {
+            selectedOpponent = nextPlayerProbability[nextPlayerProbability.length - 1].id;
+        }
+        
+        if (!selectedOpponent) return;
+        
+        // Step 6: Create match and add to matches array
+        const match = {
+            id: `singles-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            type: 'singles',
+            team1: [currentPlayer],
+            team2: [selectedOpponent],
+            round: roundNum,
+            completed: false
+        };
+        
+        matches.push(match);
+        roundMatches.push(match);
+        
+        // Mark players as used in this round
+        playersInRound.add(currentPlayer);
+        playersInRound.add(selectedOpponent);
+        
+        // Remove matched players from available list
+        const currentPlayerIndex = availablePlayerIds.indexOf(currentPlayer);
+        if (currentPlayerIndex !== -1) availablePlayerIds.splice(currentPlayerIndex, 1);
+        const opponentIndex = availablePlayerIds.indexOf(selectedOpponent);
+        if (opponentIndex !== -1) availablePlayerIds.splice(opponentIndex, 1);
+        
+        // Recursively generate next match for this round
+        generateMatch();
+    }
+    
+    // Start generating matches for this round
+    generateMatch();
+    
+    return roundMatches;
 }
 
 function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
     // TODO: Implement matchmaking algorithm for doubles matches
+    //
 }
 
 function clearMatches() {
