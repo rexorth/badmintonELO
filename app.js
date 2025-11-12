@@ -702,12 +702,12 @@ function generateSinglesRound(availablePlayerIds, roundNum, sittingPlayers, past
         if (playerPoolWithScores.length === 0) return; // No valid opponents
         
         // Step 4: Calculate probabilities using Gaussian distribution
-        const s = 1 / (2 * Math.PI);
+        const s = 1 / Math.sqrt(2 * Math.PI);
         const nextPlayerProbability = playerPoolWithScores.map(player => {
             const x = player.expectedScore;
             // Gaussian: 1/(s*sqrt(2*pi)) * e^(-((x-0.5)^2)/(2*s^2))
             const probability = (1 / (s * Math.sqrt(2 * Math.PI))) * 
-                               Math.exp(-Math.pow(x - 0.5, 2) / (2 * s * s));
+                               Math.exp(-2*Math.pow(x - 0.5, 2) / (s * s));
             return {
                 id: player.id,
                 probability: probability
