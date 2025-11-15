@@ -65,10 +65,33 @@ header h1 {
 .tab-content {
     display: none;
     padding: 30px;
+    position: relative;
 }
 
 .tab-content.active {
     display: block;
+}
+
+/* Delete all matches button positioned at bottom right */
+.delete-all-matches-btn {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.3);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+}
+
+#matches-tab.active .delete-all-matches-btn {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.delete-all-matches-btn:hover {
+    box-shadow: 0 6px 16px rgba(220, 53, 69, 0.4);
+    transform: translateY(-2px);
 }
 
 .section {
@@ -431,6 +454,28 @@ header h1 {
     margin-bottom: 5px;
 }
 
+/* Doubles match layout - stack player names vertically with score to the side */
+.match-card.doubles .team-with-score {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    justify-content: center;
+}
+
+.match-card.doubles .team-names-stacked {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+}
+
+.match-card.doubles .team-names-stacked .player-name {
+    font-weight: 600;
+    font-size: 1em;
+    color: #333;
+    white-space: nowrap;
+}
+
 .match-card .vs {
     font-size: 1.5em;
     color: #667eea;
@@ -680,19 +725,6 @@ header h1 {
     margin-bottom: 10px;
 }
 
-.manual-player-input {
-    width: 100%;
-    padding: 10px;
-    border: 2px solid #e0e0e0;
-    border-radius: 6px;
-    font-size: 14px;
-    box-sizing: border-box;
-}
-
-.manual-player-input:focus {
-    outline: none;
-    border-color: #667eea;
-}
 
 .manual-player-dropdown {
     position: absolute;
@@ -744,10 +776,130 @@ header h1 {
     background-color: white;
 }
 
+
+.match-edit-player-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 2px solid #e0e0e0;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 1000;
+    display: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    margin-top: -1px;
+}
+
+.match-edit-dropdown-item {
+    padding: 10px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background-color 0.2s;
+}
+
+.match-edit-dropdown-item:hover {
+    background-color: #f8f9fa;
+}
+
+.match-edit-dropdown-item.selected {
+    background-color: #667eea;
+    color: white;
+}
+
+.match-edit-dropdown-item.selected:hover {
+    background-color: #5568d3;
+}
+
+.match-edit-dropdown-item:last-child {
+    border-bottom: none;
+}
+
+.match-edit-dropdown-item.disabled {
+    color: #999;
+    cursor: not-allowed;
+}
+
+.match-edit-dropdown-item.disabled:hover {
+    background-color: white;
+}
+
+/* Score input boxes in match cards - match overall form style */
+.match-card input[type="number"] {
+    padding: 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.3s;
+    background: white;
+    width: 80px;
+    text-align: center;
+}
+
+.match-card input[type="number"]:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+/* Match type selector in edit mode */
+.match-card select {
+    padding: 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.match-card select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+/* Ensure match-edit-player-input matches form-group input style exactly */
+.match-edit-player-input {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: all 0.3s;
+    background: white;
+}
+
+.match-edit-player-input:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+/* Ensure manual-player-input matches form-group input style exactly */
+.manual-player-input {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+    transition: all 0.3s;
+    background: white;
+}
+
+.manual-player-input:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
 .match-card .delete-match-btn {
     margin-top: 10px;
-    padding: 6px 12px;
-    font-size: 12px;
 }
 
 .match-card .match-status {

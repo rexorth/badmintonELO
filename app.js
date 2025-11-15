@@ -39,6 +39,17 @@ let manualMatchSelections = {
 let activeManualDropdown = null; // Track which manual dropdown is currently active
 let activeManualDropdownPlayers = []; // Store current filtered players for active manual dropdown
 let activeManualDropdownIndex = -1; // Track currently selected item index in active manual dropdown
+let editingMatchId = null; // Track which match is currently being edited
+let matchEditSelections = {
+    matchType: 'singles',
+    team1Player1: null,
+    team1Player2: null,
+    team2Player1: null,
+    team2Player2: null
+}; // Track selected players for match editing
+let activeMatchEditDropdown = null; // Track which match edit dropdown is currently active
+let activeMatchEditDropdownPlayers = []; // Store current filtered players for active match edit dropdown
+let activeMatchEditDropdownIndex = -1; // Track currently selected item index in active match edit dropdown
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
@@ -48,9 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPlayers();
     initializePlayerSearch();
     renderEventPlayers();
-    renderManualMatchForm();
     renderMatches();
-    renderScores();
     renderHistory();
 });
 
@@ -72,11 +81,9 @@ function initializeTabs() {
             document.getElementById(`${targetTab}-tab`).classList.add('active');
             
             // Refresh forms when switching to certain tabs
-            if (targetTab === 'matches') {
+            if (targetTab === 'event') {
                 initializePlayerSearch();
                 renderEventPlayers();
-            } else if (targetTab === 'manual') {
-                renderManualMatchForm();
             }
         });
     });
@@ -109,6 +116,7 @@ function initializeEventListeners() {
     }
     
     document.getElementById('generate-matches-btn').addEventListener('click', generateMatches);
+    document.getElementById('generate-custom-match-btn').addEventListener('click', generateCustomMatch);
     document.getElementById('export-data-btn').addEventListener('click', exportData);
     document.getElementById('import-data-btn').addEventListener('click', () => {
         document.getElementById('import-data-file').click();
@@ -154,9 +162,23 @@ function initializeEventListeners() {
                 activeManualDropdownPlayers = [];
             }
         }
+        
+        // Handle match edit dropdowns
+        if (!e.target.classList.contains('match-edit-player-input') && 
+            !e.target.closest('.match-edit-player-dropdown')) {
+            const matchEditDropdowns = document.querySelectorAll('.match-edit-player-dropdown');
+            if (matchEditDropdowns.length > 0) {
+                matchEditDropdowns.forEach(dd => {
+                    if (dd.style.display !== 'none') {
+                        dd.style.display = 'none';
+                    }
+                });
+                activeMatchEditDropdown = null;
+                activeMatchEditDropdownIndex = -1;
+                activeMatchEditDropdownPlayers = [];
+            }
+        }
     });
-    document.getElementById('submit-manual-match-btn').addEventListener('click', submitManualMatch);
-    document.getElementById('manual-match-type').addEventListener('change', renderManualMatchForm);
 }
 
 // Player Management
@@ -196,7 +218,6 @@ function addPlayer() {
     renderPlayers();
     initializePlayerSearch();
     renderEventPlayers();
-    renderManualMatchForm();
 }
 
 function deletePlayer(playerId) {
@@ -211,9 +232,7 @@ function deletePlayer(playerId) {
         renderPlayers();
         initializePlayerSearch();
         renderEventPlayers();
-        renderManualMatchForm();
         renderMatches();
-        renderScores();
     }
 }
 
@@ -561,7 +580,6 @@ function generateMatches() {
     
     saveData();
     renderMatches();
-    renderScores();
 }
 
 // Helper function to get the maximum round number from existing matches
@@ -1446,6 +1464,19 @@ function renderMatches() {
     // Only show uncompleted matches in the Generate Matches section
     const uncompletedMatches = matches.filter(m => !m.completed);
     
+    // Preserve existing score input values before re-rendering
+    const preservedScores = {};
+    uncompletedMatches.forEach(match => {
+        const score1Input = document.getElementById(`score1-${match.id}`);
+        const score2Input = document.getElementById(`score2-${match.id}`);
+        if (score1Input && score1Input.value !== '') {
+            preservedScores[`score1-${match.id}`] = score1Input.value;
+        }
+        if (score2Input && score2Input.value !== '') {
+            preservedScores[`score2-${match.id}`] = score2Input.value;
+        }
+    });
+    
     if (uncompletedMatches.length === 0) {
         matchesList.innerHTML = '<div class="empty-state"><h3>No matches generated</h3><p>Generate matches to see them here</p></div>';
         return;
@@ -1487,35 +1518,251 @@ function renderMatches() {
         }).filter(name => name !== 'Unknown');
     };
     
-    matchesList.innerHTML = rounds.map(round => {
+    matchesList.innerHTML = rounds.map((round, roundIndex) => {
         const roundMatches = matchesByRound[round];
         const sittingOutPlayers = getSittingOutPlayers(roundMatches);
         
         const roundHeader = round !== 'Unspecified' ? `<h3 style="margin-top: 20px; margin-bottom: 10px; color: #667eea;">Round ${round}</h3>` : '';
         
-        const matchesHtml = roundMatches.map(match => {
-            const team1Players = match.team1.map(id => getPlayerNameWithRating(id)).join(' & ');
-            const team2Players = match.team2.map(id => getPlayerNameWithRating(id)).join(' & ');
+        const matchesHtml = roundMatches.map((match, matchIndex) => {
+            const isEditing = editingMatchId === match.id;
+            const isLastMatch = matchIndex === roundMatches.length - 1;
             
-            return `
-                <div class="match-card ${match.type}">
-                    <div class="match-id">
-                        Match ID: ${match.id} | Type: ${match.type}
-                    </div>
-                    <div class="teams">
-                        <div class="team">
-                            <div class="team-name">${escapeHtml(team1Players)}</div>
+            // Restore preserved score values if they exist
+            const score1Value = preservedScores[`score1-${match.id}`] || '';
+            const score2Value = preservedScores[`score2-${match.id}`] || '';
+            
+            if (isEditing) {
+                // Edit mode - show dropdowns with match type selector
+                const currentMatchType = matchEditSelections.matchType || match.type || 'singles';
+                
+                if (currentMatchType === 'singles') {
+                    return `
+                        <div class="match-card ${currentMatchType}">
+                            <div class="match-id">
+                                Match ID: ${match.id}
+                            </div>
+                            <div style="margin-bottom: 10px;">
+                                <label for="match-edit-${match.id}-type">Match Type: </label>
+                                <select id="match-edit-${match.id}-type" onchange="updateMatchEditType('${match.id}')" style="margin-left: 5px;">
+                                    <option value="singles" ${currentMatchType === 'singles' ? 'selected' : ''}>Singles</option>
+                                    <option value="doubles" ${currentMatchType === 'doubles' ? 'selected' : ''}>Doubles</option>
+                                </select>
+                            </div>
+                            <div class="teams">
+                                <div class="team">
+                                    <div class="manual-dropdown-wrapper">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team1-player1-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team1Player1"
+                                               value="${matchEditSelections.team1Player1 ? getPlayerName(matchEditSelections.team1Player1) : ''}" />
+                                        <div id="match-edit-${match.id}-team1-player1-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                </div>
+                                <div class="vs">VS</div>
+                                <div class="team">
+                                    <div class="manual-dropdown-wrapper">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team2-player1-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team2Player1"
+                                               value="${matchEditSelections.team2Player1 ? getPlayerName(matchEditSelections.team2Player1) : ''}" />
+                                        <div id="match-edit-${match.id}-team2-player1-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
+                                <button class="btn btn-danger delete-match-btn" onclick="deleteMatch('${match.id}')">
+                                    Delete Match
+                                </button>
+                                <div>
+                                    <button class="btn btn-success" onclick="saveMatchEdit('${match.id}')" style="margin-right: 10px;">
+                                        Save Changes
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="cancelMatchEdit('${match.id}')">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                        <div class="vs">VS</div>
-                        <div class="team">
-                            <div class="team-name">${escapeHtml(team2Players)}</div>
+                    `;
+                } else {
+                    return `
+                        <div class="match-card ${currentMatchType}">
+                            <div class="match-id">
+                                Match ID: ${match.id}
+                            </div>
+                            <div style="margin-bottom: 10px;">
+                                <label for="match-edit-${match.id}-type">Match Type: </label>
+                                <select id="match-edit-${match.id}-type" onchange="updateMatchEditType('${match.id}')" style="margin-left: 5px;">
+                                    <option value="singles" ${currentMatchType === 'singles' ? 'selected' : ''}>Singles</option>
+                                    <option value="doubles" ${currentMatchType === 'doubles' ? 'selected' : ''}>Doubles</option>
+                                </select>
+                            </div>
+                            <div class="teams">
+                                <div class="team">
+                                    <div class="manual-dropdown-wrapper">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team1-player1-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player 1..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team1Player1"
+                                               value="${matchEditSelections.team1Player1 ? getPlayerName(matchEditSelections.team1Player1) : ''}" />
+                                        <div id="match-edit-${match.id}-team1-player1-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                    <div class="manual-dropdown-wrapper" style="margin-top: 5px;">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team1-player2-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player 2..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team1Player2"
+                                               value="${matchEditSelections.team1Player2 ? getPlayerName(matchEditSelections.team1Player2) : ''}" />
+                                        <div id="match-edit-${match.id}-team1-player2-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                </div>
+                                <div class="vs">VS</div>
+                                <div class="team">
+                                    <div class="manual-dropdown-wrapper">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team2-player1-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player 1..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team2Player1"
+                                               value="${matchEditSelections.team2Player1 ? getPlayerName(matchEditSelections.team2Player1) : ''}" />
+                                        <div id="match-edit-${match.id}-team2-player1-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                    <div class="manual-dropdown-wrapper" style="margin-top: 5px;">
+                                        <input type="text" 
+                                               id="match-edit-${match.id}-team2-player2-input" 
+                                               class="match-edit-player-input" 
+                                               placeholder="Search and select player 2..." 
+                                               autocomplete="off"
+                                               data-match-id="${match.id}"
+                                               data-field="team2Player2"
+                                               value="${matchEditSelections.team2Player2 ? getPlayerName(matchEditSelections.team2Player2) : ''}" />
+                                        <div id="match-edit-${match.id}-team2-player2-dropdown" class="match-edit-player-dropdown"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
+                                <button class="btn btn-danger delete-match-btn" onclick="deleteMatch('${match.id}')">
+                                    Delete Match
+                                </button>
+                                <div>
+                                    <button class="btn btn-success" onclick="saveMatchEdit('${match.id}')" style="margin-right: 10px;">
+                                        Save Changes
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="cancelMatchEdit('${match.id}')">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                    <button class="btn btn-danger delete-match-btn" onclick="deleteMatch('${match.id}')">
-                        Delete Match
-                    </button>
-                </div>
-            `;
+                    `;
+                }
+            } else {
+                // Normal view - show players with inline score inputs
+                if (match.type === 'doubles') {
+                    // For doubles, stack player names vertically with score to the side
+                    const team1PlayerNames = match.team1.map(id => getPlayerNameWithRating(id));
+                    const team2PlayerNames = match.team2.map(id => getPlayerNameWithRating(id));
+                    
+                    return `
+                        <div class="match-card ${match.type}">
+                            <div class="match-id">
+                                Match ID: ${match.id} | Type: ${match.type}
+                            </div>
+                            <div class="teams">
+                                <div class="team">
+                                    <div class="team-with-score">
+                                        <div class="team-names-stacked">
+                                            ${team1PlayerNames.map(name => `<div class="player-name">${escapeHtml(name)}</div>`).join('')}
+                                        </div>
+                                        <input type="number" min="0" max="30" id="score1-${match.id}" value="${score1Value}" placeholder="Score" />
+                                    </div>
+                                </div>
+                                <div class="vs">VS</div>
+                                <div class="team">
+                                    <div class="team-with-score">
+                                        <input type="number" min="0" max="30" id="score2-${match.id}" value="${score2Value}" placeholder="Score" />
+                                        <div class="team-names-stacked">
+                                            ${team2PlayerNames.map(name => `<div class="player-name">${escapeHtml(name)}</div>`).join('')}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
+                                <button class="btn btn-danger delete-match-btn" onclick="deleteMatch('${match.id}')">
+                                    Delete Match
+                                </button>
+                                <div>
+                                    <button class="btn btn-primary" onclick="startMatchEdit('${match.id}')" style="margin-right: 10px;">
+                                        Edit Match
+                                    </button>
+                                    <button class="btn btn-success" onclick="submitScoreInline('${match.id}')">
+                                        Submit Score
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        ${isLastMatch ? `<div style="margin-top: 10px; margin-bottom: 15px;"><button class="btn btn-secondary" onclick="addNewMatch(${round === 'Unspecified' ? 'null' : round})">Add Match</button></div>` : ''}
+                    `;
+                } else {
+                    // For singles, keep the horizontal layout
+                    const team1Players = match.team1.map(id => getPlayerNameWithRating(id)).join(' & ');
+                    const team2Players = match.team2.map(id => getPlayerNameWithRating(id)).join(' & ');
+                    
+                    return `
+                        <div class="match-card ${match.type}">
+                            <div class="match-id">
+                                Match ID: ${match.id} | Type: ${match.type}
+                            </div>
+                            <div class="teams">
+                                <div class="team">
+                                    <div class="team-name" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;">
+                                        <div>${escapeHtml(team1Players)}</div>
+                                        <input type="number" min="0" max="30" id="score1-${match.id}" value="${score1Value}" placeholder="Score" />
+                                    </div>
+                                </div>
+                                <div class="vs">VS</div>
+                                <div class="team">
+                                    <div class="team-name" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;">
+                                        <input type="number" min="0" max="30" id="score2-${match.id}" value="${score2Value}" placeholder="Score" />
+                                        <div>${escapeHtml(team2Players)}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
+                                <button class="btn btn-danger delete-match-btn" onclick="deleteMatch('${match.id}')">
+                                    Delete Match
+                                </button>
+                                <div>
+                                    <button class="btn btn-primary" onclick="startMatchEdit('${match.id}')" style="margin-right: 10px;">
+                                        Edit Match
+                                    </button>
+                                    <button class="btn btn-success" onclick="submitScoreInline('${match.id}')">
+                                        Submit Score
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        ${isLastMatch ? `<div style="margin-top: 10px; margin-bottom: 15px;"><button class="btn btn-secondary" onclick="addNewMatch(${round === 'Unspecified' ? 'null' : round})">Add Match</button></div>` : ''}
+                    `;
+                }
+            }
         }).join('');
         
         // Create sitting out players list HTML
@@ -1530,94 +1777,515 @@ function renderMatches() {
         
         return `<div class="round-container">${roundHeader}<div class="round-content"><div class="matches-container">${matchesHtml}</div>${sittingOutHtml}</div></div>`;
     }).join('');
-}
-
-// Score Entry
-function renderScores() {
-    const scoresList = document.getElementById('matches-to-score');
-    const pendingMatches = matches.filter(m => !m.completed);
     
-    // Preserve existing input values before re-rendering
-    const preservedScores = {};
-    pendingMatches.forEach(match => {
-        const score1Input = document.getElementById(`score1-${match.id}`);
-        const score2Input = document.getElementById(`score2-${match.id}`);
-        if (score1Input && score1Input.value !== '') {
-            preservedScores[`score1-${match.id}`] = score1Input.value;
-        }
-        if (score2Input && score2Input.value !== '') {
-            preservedScores[`score2-${match.id}`] = score2Input.value;
-        }
-    });
-    
-    if (pendingMatches.length === 0) {
-        scoresList.innerHTML = '<div class="empty-state"><h3>No matches to score</h3><p>Generate matches and they will appear here</p></div>';
-        return;
+    // Initialize match edit dropdowns if a match is being edited
+    if (editingMatchId) {
+        initializeMatchEditDropdowns();
     }
-    
-    // Group matches by round if they have round numbers
-    const matchesByRound = {};
-    pendingMatches.forEach(match => {
-        const round = match.round || 'Unspecified';
-        if (!matchesByRound[round]) {
-            matchesByRound[round] = [];
-        }
-        matchesByRound[round].push(match);
-    });
-    
-    const rounds = Object.keys(matchesByRound).sort((a, b) => {
-        if (a === 'Unspecified') return 1;
-        if (b === 'Unspecified') return -1;
-        return parseInt(a) - parseInt(b);
-    });
-    
-    scoresList.innerHTML = rounds.map(round => {
-        const roundMatches = matchesByRound[round];
-        const roundHeader = round !== 'Unspecified' ? `<h3 style="margin-top: 20px; margin-bottom: 10px; color: #667eea;">Round ${round}</h3>` : '';
-        
-        const matchesHtml = roundMatches.map(match => {
-            const team1Players = match.team1.map(id => getPlayerName(id)).join(' & ');
-            const team2Players = match.team2.map(id => getPlayerName(id)).join(' & ');
-            
-            // Restore preserved values if they exist
-            const score1Value = preservedScores[`score1-${match.id}`] || '';
-            const score2Value = preservedScores[`score2-${match.id}`] || '';
-            
-            return `
-                <div class="match-card ${match.type}">
-                    <div class="match-id">Match ID: ${match.id}</div>
-                    <div class="teams">
-                        <div class="team">
-                            <div class="team-name">${escapeHtml(team1Players)}</div>
-                        </div>
-                        <div class="vs">VS</div>
-                        <div class="team">
-                            <div class="team-name">${escapeHtml(team2Players)}</div>
-                        </div>
-                    </div>
-                    <form class="score-input-form" onsubmit="submitScore(event, '${match.id}')">
-                        <label>${escapeHtml(team1Players)}:</label>
-                        <input type="number" min="0" max="30" id="score1-${match.id}" value="${score1Value}" required />
-                        <label>${escapeHtml(team2Players)}:</label>
-                        <input type="number" min="0" max="30" id="score2-${match.id}" value="${score2Value}" required />
-                        <button type="submit" class="btn btn-success">Submit Score</button>
-                    </form>
-                </div>
-            `;
-        }).join('');
-        
-        return roundHeader + matchesHtml;
-    }).join('');
 }
 
-function submitScore(event, matchId) {
-    event.preventDefault();
-    
+// Match Editing Functions
+function startMatchEdit(matchId) {
     const match = matches.find(m => m.id === matchId);
     if (!match) return;
     
-    const score1 = parseInt(document.getElementById(`score1-${matchId}`).value);
-    const score2 = parseInt(document.getElementById(`score2-${matchId}`).value);
+    // Initialize edit selections with current match players
+    editingMatchId = matchId;
+    matchEditSelections = {
+        matchType: match.type || 'singles',
+        team1Player1: match.team1[0] || null,
+        team1Player2: match.team1[1] || null,
+        team2Player1: match.team2[0] || null,
+        team2Player2: match.team2[1] || null
+    };
+    
+    renderMatches();
+}
+
+function generateCustomMatch() {
+    // Get the current round number (next round after existing matches, or 1 if no matches)
+    const currentRound = getMaxRoundNumber() + 1;
+    // Get the selected match type from the dropdown
+    const matchTypeSelect = document.getElementById('match-type');
+    const matchType = matchTypeSelect ? matchTypeSelect.value : 'singles';
+    addNewMatch(currentRound, matchType);
+}
+
+function addNewMatch(round, matchType = 'singles') {
+    // Create a new match
+    const newMatch = {
+        id: Date.now().toString(),
+        type: matchType,
+        team1: [],
+        team2: [],
+        completed: false,
+        round: round || undefined
+    };
+    
+    matches.push(newMatch);
+    saveData();
+    
+    // Open it for editing
+    editingMatchId = newMatch.id;
+    matchEditSelections = {
+        matchType: matchType,
+        team1Player1: null,
+        team1Player2: null,
+        team2Player1: null,
+        team2Player2: null
+    };
+    
+    renderMatches();
+}
+
+function updateMatchEditType(matchId) {
+    const selectElement = document.getElementById(`match-edit-${matchId}-type`);
+    if (!selectElement) return;
+    
+    const newType = selectElement.value;
+    matchEditSelections.matchType = newType;
+    
+    // When switching from doubles to singles, keep first player on each team
+    // When switching from singles to doubles, add null for second player
+    if (newType === 'singles') {
+        // Keep first player, clear second
+        matchEditSelections.team1Player2 = null;
+        matchEditSelections.team2Player2 = null;
+    }
+    // If switching to doubles, second players remain null (user needs to fill them)
+    
+    renderMatches();
+}
+
+function cancelMatchEdit(matchId) {
+    // If this is a new match with no players, delete it
+    const match = matches.find(m => m.id === matchId);
+    if (match && match.team1.length === 0 && match.team2.length === 0) {
+        matches = matches.filter(m => m.id !== matchId);
+        saveData();
+    }
+    
+    editingMatchId = null;
+    matchEditSelections = {
+        matchType: 'singles',
+        team1Player1: null,
+        team1Player2: null,
+        team2Player1: null,
+        team2Player2: null
+    };
+    activeMatchEditDropdown = null;
+    activeMatchEditDropdownIndex = -1;
+    activeMatchEditDropdownPlayers = [];
+    renderMatches();
+}
+
+function saveMatchEdit(matchId) {
+    const match = matches.find(m => m.id === matchId);
+    if (!match) return;
+    
+    // Get the match type from selections (may have been changed)
+    const matchType = matchEditSelections.matchType || match.type || 'singles';
+    
+    // Validate selections based on match type
+    if (matchType === 'singles') {
+        if (!matchEditSelections.team1Player1 || !matchEditSelections.team2Player1) {
+            alert('Please select all players');
+            return;
+        }
+        if (matchEditSelections.team1Player1 === matchEditSelections.team2Player1) {
+            alert('Players cannot play against themselves');
+            return;
+        }
+    } else {
+        if (!matchEditSelections.team1Player1 || !matchEditSelections.team1Player2 || 
+            !matchEditSelections.team2Player1 || !matchEditSelections.team2Player2) {
+            alert('Please select all players');
+            return;
+        }
+        // Check for duplicate players
+        const allPlayers = [
+            matchEditSelections.team1Player1, 
+            matchEditSelections.team1Player2, 
+            matchEditSelections.team2Player1, 
+            matchEditSelections.team2Player2
+        ];
+        if (new Set(allPlayers).size !== 4) {
+            alert('Each player can only appear once in a match');
+            return;
+        }
+    }
+    
+    // Get all players that are being changed
+    const oldTeam1 = match.team1;
+    const oldTeam2 = match.team2;
+    const newTeam1 = matchType === 'singles' 
+        ? [matchEditSelections.team1Player1]
+        : [matchEditSelections.team1Player1, matchEditSelections.team1Player2];
+    const newTeam2 = matchType === 'singles'
+        ? [matchEditSelections.team2Player1]
+        : [matchEditSelections.team2Player1, matchEditSelections.team2Player2];
+    
+    // Find players that are being moved to this match from other matches
+    const playersToSwap = [];
+    newTeam1.forEach(newPlayerId => {
+        if (!oldTeam1.includes(newPlayerId) && !oldTeam2.includes(newPlayerId)) {
+            // This player is new to this match - check if they're in another match
+            const otherMatch = matches.find(m => 
+                m.id !== matchId && 
+                !m.completed && 
+                (m.team1.includes(newPlayerId) || m.team2.includes(newPlayerId))
+            );
+            if (otherMatch) {
+                playersToSwap.push({
+                    playerId: newPlayerId,
+                    fromMatch: otherMatch,
+                    toMatch: match,
+                    toTeam: 'team1',
+                    toPosition: newTeam1.indexOf(newPlayerId)
+                });
+            }
+        }
+    });
+    
+    newTeam2.forEach(newPlayerId => {
+        if (!oldTeam1.includes(newPlayerId) && !oldTeam2.includes(newPlayerId)) {
+            // This player is new to this match - check if they're in another match
+            const otherMatch = matches.find(m => 
+                m.id !== matchId && 
+                !m.completed && 
+                (m.team1.includes(newPlayerId) || m.team2.includes(newPlayerId))
+            );
+            if (otherMatch) {
+                playersToSwap.push({
+                    playerId: newPlayerId,
+                    fromMatch: otherMatch,
+                    toMatch: match,
+                    toTeam: 'team2',
+                    toPosition: newTeam2.indexOf(newPlayerId)
+                });
+            }
+        }
+    });
+    
+    // Perform swaps: for each player being moved to this match, swap them with the player they're replacing
+    playersToSwap.forEach(swap => {
+        const fromMatch = swap.fromMatch;
+        const fromTeam = fromMatch.team1.includes(swap.playerId) ? 'team1' : 'team2';
+        const fromPosition = fromMatch[fromTeam].indexOf(swap.playerId);
+        
+        // Find the player being replaced in the target match (use old teams since we haven't updated yet)
+        const replacedPlayerId = swap.toTeam === 'team1' 
+            ? oldTeam1[swap.toPosition]
+            : oldTeam2[swap.toPosition];
+        
+        // Swap: move new player will go to target match (handled below), move replaced player to source match
+        fromMatch[fromTeam][fromPosition] = replacedPlayerId;
+    });
+    
+    // Update the match with new teams and type
+    match.team1 = newTeam1;
+    match.team2 = newTeam2;
+    match.type = matchType;
+    
+    // Clear edit state
+    editingMatchId = null;
+    matchEditSelections = {
+        matchType: 'singles',
+        team1Player1: null,
+        team1Player2: null,
+        team2Player1: null,
+        team2Player2: null
+    };
+    activeMatchEditDropdown = null;
+    activeMatchEditDropdownIndex = -1;
+    activeMatchEditDropdownPlayers = [];
+    
+    saveData();
+    renderMatches();
+}
+
+function initializeMatchEditDropdowns() {
+    const inputs = document.querySelectorAll('.match-edit-player-input');
+    
+    inputs.forEach(input => {
+        const field = input.getAttribute('data-field');
+        const matchId = input.getAttribute('data-match-id');
+        const dropdownId = input.id.replace('-input', '-dropdown');
+        const dropdown = document.getElementById(dropdownId);
+        
+        if (!dropdown) return;
+        
+        // Input event - search and filter
+        input.addEventListener('input', (e) => {
+            const selectedPlayerId = matchEditSelections[field];
+            if (selectedPlayerId) {
+                const selectedPlayer = players.find(p => p.id === selectedPlayerId);
+                if (selectedPlayer && input.value !== selectedPlayer.name) {
+                    matchEditSelections[field] = null;
+                }
+            }
+            handleMatchEditSearch(e, field, dropdown, matchId);
+        });
+        
+        // Focus event - show dropdown
+        input.addEventListener('focus', (e) => {
+            activeMatchEditDropdown = field;
+            handleMatchEditSearch(e, field, dropdown, matchId);
+        });
+        
+        // Blur event - close dropdown when focus is lost
+        input.addEventListener('blur', (e) => {
+            setTimeout(() => {
+                if (activeMatchEditDropdown === field) {
+                    dropdown.style.display = 'none';
+                    activeMatchEditDropdown = null;
+                    activeMatchEditDropdownIndex = -1;
+                    activeMatchEditDropdownPlayers = [];
+                }
+            }, 200);
+        });
+        
+        // Keydown event - keyboard navigation
+        input.addEventListener('keydown', (e) => {
+            handleMatchEditKeydown(e, field, dropdown, matchId);
+        });
+        
+        // Click event - show dropdown
+        input.addEventListener('click', (e) => {
+            activeMatchEditDropdown = field;
+            handleMatchEditSearch(e, field, dropdown, matchId);
+        });
+    });
+}
+
+function handleMatchEditSearch(event, field, dropdown, matchId) {
+    const input = event.target;
+    const searchTerm = input.value.toLowerCase().trim();
+    
+    // Reset selected index when search changes
+    if (activeMatchEditDropdown === field) {
+        activeMatchEditDropdownIndex = -1;
+    }
+    
+    // Get all players in the event, sorted alphabetically
+    const sortedPlayers = eventPlayers
+        .map(id => players.find(p => p.id === id))
+        .filter(p => p !== undefined)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    
+    // Get currently selected players in other fields of this match to exclude them
+    const otherSelectedPlayers = Object.values(matchEditSelections).filter(id => id && id !== matchEditSelections[field]);
+    
+    // Get current match to exclude players already in it (unless they're being edited)
+    const currentMatch = matches.find(m => m.id === matchId);
+    const currentMatchPlayers = currentMatch ? [...currentMatch.team1, ...currentMatch.team2] : [];
+    
+    let filteredPlayers;
+    if (searchTerm === '') {
+        // Show all event players not selected in other fields
+        filteredPlayers = sortedPlayers.filter(p => 
+            !otherSelectedPlayers.includes(p.id) && 
+            // Allow current match players to be shown (they can stay the same)
+            (currentMatchPlayers.includes(p.id) || !currentMatchPlayers.includes(p.id))
+        );
+    } else {
+        // Filter by search term
+        filteredPlayers = sortedPlayers.filter(player => {
+            const nameMatch = player.name.toLowerCase().includes(searchTerm);
+            const notSelectedElsewhere = !otherSelectedPlayers.includes(player.id);
+            return nameMatch && notSelectedElsewhere;
+        });
+    }
+    
+    if (activeMatchEditDropdown === field) {
+        activeMatchEditDropdownPlayers = filteredPlayers;
+    }
+    
+    renderMatchEditDropdown(filteredPlayers, dropdown, field);
+}
+
+function handleMatchEditKeydown(event, field, dropdown, matchId) {
+    if (activeMatchEditDropdown !== field) return;
+    
+    // Handle Tab key - close dropdown immediately when tabbing away
+    if (event.key === 'Tab') {
+        dropdown.style.display = 'none';
+        activeMatchEditDropdown = null;
+        activeMatchEditDropdownIndex = -1;
+        activeMatchEditDropdownPlayers = [];
+        return;
+    }
+    
+    const items = dropdown.querySelectorAll('.match-edit-dropdown-item:not(.disabled)');
+    if (items.length === 0) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+        }
+        return;
+    }
+    
+    switch (event.key) {
+        case 'ArrowDown':
+            event.preventDefault();
+            if (activeMatchEditDropdownIndex < 0) {
+                activeMatchEditDropdownIndex = 0;
+            } else {
+                activeMatchEditDropdownIndex = (activeMatchEditDropdownIndex + 1) % items.length;
+            }
+            updateMatchEditDropdownSelection(items);
+            scrollToMatchEditSelectedItem(items[activeMatchEditDropdownIndex], dropdown);
+            break;
+        case 'ArrowUp':
+            event.preventDefault();
+            if (activeMatchEditDropdownIndex <= 0) {
+                activeMatchEditDropdownIndex = items.length - 1;
+            } else {
+                activeMatchEditDropdownIndex = activeMatchEditDropdownIndex - 1;
+            }
+            updateMatchEditDropdownSelection(items);
+            scrollToMatchEditSelectedItem(items[activeMatchEditDropdownIndex], dropdown);
+            break;
+        case 'Enter':
+            event.preventDefault();
+            if (activeMatchEditDropdownIndex >= 0 && activeMatchEditDropdownIndex < items.length) {
+                const playerId = items[activeMatchEditDropdownIndex].getAttribute('data-player-id');
+                if (playerId) {
+                    selectMatchEditPlayer(field, playerId);
+                }
+            } else if (items.length > 0) {
+                const playerId = items[0].getAttribute('data-player-id');
+                if (playerId) {
+                    selectMatchEditPlayer(field, playerId);
+                }
+            }
+            break;
+        case 'Escape':
+            event.preventDefault();
+            dropdown.style.display = 'none';
+            activeMatchEditDropdown = null;
+            activeMatchEditDropdownIndex = -1;
+            activeMatchEditDropdownPlayers = [];
+            break;
+    }
+}
+
+function renderMatchEditDropdown(playersToShow, dropdown, field) {
+    if (playersToShow.length === 0) {
+        dropdown.innerHTML = '<div class="match-edit-dropdown-item disabled">No players available</div>';
+        dropdown.style.display = 'block';
+        return;
+    }
+    
+    // Reset selected index when rendering new dropdown
+    if (activeMatchEditDropdown === field) {
+        activeMatchEditDropdownIndex = -1;
+    }
+    
+    dropdown.innerHTML = playersToShow
+        .map((player, index) => `
+            <div class="match-edit-dropdown-item ${index === activeMatchEditDropdownIndex && activeMatchEditDropdown === field ? 'selected' : ''}" 
+                 data-player-id="${player.id}">
+                ${escapeHtml(player.name)} (${Math.round(player.rating)})
+            </div>
+        `).join('');
+    
+    dropdown.style.display = 'block';
+    
+    // Add click listeners to dropdown items
+    dropdown.querySelectorAll('.match-edit-dropdown-item:not(.disabled)').forEach((item, index) => {
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (activeMatchEditDropdown === field) {
+                activeMatchEditDropdownIndex = index;
+            }
+            const playerId = item.getAttribute('data-player-id');
+            if (playerId) {
+                selectMatchEditPlayer(field, playerId);
+            }
+        });
+        
+        item.addEventListener('mouseenter', () => {
+            if (activeMatchEditDropdown === field) {
+                activeMatchEditDropdownIndex = index;
+                updateMatchEditDropdownSelection(dropdown.querySelectorAll('.match-edit-dropdown-item:not(.disabled)'));
+            }
+        });
+    });
+}
+
+function updateMatchEditDropdownSelection(items) {
+    items.forEach((item, index) => {
+        if (index === activeMatchEditDropdownIndex && activeMatchEditDropdown) {
+            item.classList.add('selected');
+        } else {
+            item.classList.remove('selected');
+        }
+    });
+}
+
+function scrollToMatchEditSelectedItem(item, dropdown) {
+    if (!item) return;
+    
+    const itemTop = item.offsetTop;
+    const itemBottom = itemTop + item.offsetHeight;
+    const dropdownTop = dropdown.scrollTop;
+    const dropdownBottom = dropdownTop + dropdown.offsetHeight;
+    
+    if (itemTop < dropdownTop) {
+        dropdown.scrollTop = itemTop;
+    } else if (itemBottom > dropdownBottom) {
+        dropdown.scrollTop = itemBottom - dropdown.offsetHeight;
+    }
+}
+
+function selectMatchEditPlayer(field, playerId) {
+    matchEditSelections[field] = playerId;
+    
+    // Find the input by field and match ID (only one match can be edited at a time)
+    const inputs = document.querySelectorAll('.match-edit-player-input');
+    inputs.forEach(input => {
+        if (input.getAttribute('data-field') === field && 
+            input.getAttribute('data-match-id') === editingMatchId) {
+            const player = players.find(p => p.id === playerId);
+            if (player) {
+                input.value = player.name;
+            }
+        }
+    });
+    
+    // Hide dropdown immediately
+    const dropdowns = document.querySelectorAll('.match-edit-player-dropdown');
+    dropdowns.forEach(dd => {
+        if (dd.style.display !== 'none') {
+            dd.style.display = 'none';
+        }
+    });
+    
+    // Reset active dropdown state
+    activeMatchEditDropdown = null;
+    activeMatchEditDropdownIndex = -1;
+    activeMatchEditDropdownPlayers = [];
+}
+
+function submitScoreInline(matchId) {
+    const match = matches.find(m => m.id === matchId);
+    if (!match) return;
+    
+    const score1Input = document.getElementById(`score1-${matchId}`);
+    const score2Input = document.getElementById(`score2-${matchId}`);
+    
+    if (!score1Input || !score2Input) {
+        alert('Score inputs not found');
+        return;
+    }
+    
+    const score1 = parseInt(score1Input.value);
+    const score2 = parseInt(score2Input.value);
+    
+    if (isNaN(score1) || isNaN(score2)) {
+        alert('Please enter valid scores');
+        return;
+    }
     
     if (score1 < 0 || score2 < 0) {
         alert('Scores cannot be negative');
@@ -1657,9 +2325,13 @@ function submitScore(event, matchId) {
     
     saveData();
     renderMatches();
-    renderScores();
     renderPlayers();
     renderHistory();
+}
+
+function submitScore(event, matchId) {
+    event.preventDefault();
+    submitScoreInline(matchId);
 }
 
 // ELO Rating Calculation
@@ -2541,4 +3213,7 @@ window.deletePlayer = deletePlayer;
 window.submitScore = submitScore;
 window.deleteMatch = deleteMatch;
 window.removePlayerFromEvent = removePlayerFromEvent;
+window.startMatchEdit = startMatchEdit;
+window.cancelMatchEdit = cancelMatchEdit;
+window.saveMatchEdit = saveMatchEdit;
 
