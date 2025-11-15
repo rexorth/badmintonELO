@@ -4,11 +4,30 @@ const ELO_CONFIG = {
     INITIAL_RATING: 1500
 };
 
+// Matchmaking Configuration Constants
+const MATCHMAKING_CONFIG = {
+    MAX_PAST_ROUNDS: 3,      // how many past rounds matter (for storing in pastRounds queue)
+    SPREAD_TOL: 200.0,       // allowed rating spread inside a 4-player group before penalty (doubles)
+    SIGMA_SKILL: 0.15,       // width of Gaussian around expected_score=0.5
+    ALPHA_SOFTMAX: 1.0,      // higher → more deterministic, lower → more random
+    W_SKILL: 1.0,            // weight for skill term
+    W_PARTNER: 0.5,          // weight for partner history term (doubles)
+    W_OPP: 0.2,              // weight for opponent history term
+    W_SPREAD: 0.01           // weight for spread term
+};
+
 // Data Storage
 let players = [];
 let matches = [];
 let matchHistory = [];
 let eventPlayers = []; // Track players selected for the current event
+
+// Matchmaking History Data Structures
+// These track opponent and partner history for matchmaking
+let opponentCount = {};      // opponentCount[p][q] = number of times p played against q
+let lastOpponentRound = {};  // lastOpponentRound[p][q] = round number when p last played against q
+let partnerCount = {};       // partnerCount[p][q] = number of times p played with q (doubles)
+let lastPartnerRound = {};   // lastPartnerRound[p][q] = round number when p last played with q (doubles)
 let currentDropdownPlayers = []; // Store current filtered players for keyboard navigation
 let selectedDropdownIndex = -1; // Track currently selected item index in dropdown
 let manualMatchSelections = {
@@ -562,229 +581,819 @@ function generateSinglesMatches(selectedPlayerIds, numRounds, maxCourts) {
     // Get the starting round number (next round after existing matches)
     const startRound = getMaxRoundNumber() + 1;
     
-    // Initialize: empty sitting players and empty past rounds queue
-    const sittingPlayers = [];
-    const pastRounds = []; // Queue of last 3 rounds, oldest at front
+    // Initialize history data structures
+    initializeHistory(selectedPlayerIds);
     
-    // Generate rounds recursively
+    // Initialize past rounds queue and sitting players
+    const pastRounds = []; // Queue of last MAX_PAST_ROUNDS rounds, oldest at front
+    let sittingPlayers = new Set();
+    
+    // Generate all rounds
     for (let roundNum = startRound; roundNum < startRound + numRounds; roundNum++) {
         const roundMatches = generateSinglesRound(
-            [...selectedPlayerIds], // Copy to avoid mutation
+            selectedPlayerIds,
             roundNum,
             sittingPlayers,
             pastRounds,
             maxCourts
         );
         
-        // Update sitting players for next round (players who didn't play this round)
+        // Push round into queue of past rounds (for avoiding immediate repeats within generation session)
+        pastRounds.push(roundMatches);
+        if (pastRounds.length > MATCHMAKING_CONFIG.MAX_PAST_ROUNDS) {
+            pastRounds.shift(); // Remove oldest round
+        }
+        
+        // Note: History is updated when matches are completed (in submitScore/submitManualMatch),
+        // not during generation, since generated matches haven't been played yet
+        
+        // Update sitting players for next round
         const playingThisRound = new Set();
         roundMatches.forEach(match => {
             playingThisRound.add(match.team1[0]);
             playingThisRound.add(match.team2[0]);
         });
         
-        // Update sitting players: those who sat out this round
-        sittingPlayers.length = 0; // Clear previous
+        sittingPlayers = new Set();
         selectedPlayerIds.forEach(playerId => {
             if (!playingThisRound.has(playerId)) {
-                sittingPlayers.push(playerId);
+                sittingPlayers.add(playerId);
             }
         });
-        
-        // Add this round to pastRounds queue (keep only last 3)
-        pastRounds.push(roundMatches);
-        if (pastRounds.length > 3) {
-            pastRounds.shift(); // Remove oldest round
-        }
     }
 }
 
-function generateSinglesRound(availablePlayerIds, roundNum, sittingPlayers, pastRounds, maxCourts) {
-    const roundMatches = [];
-    const playersInRound = new Set(); // Track players already matched in this round
-    
-    // Recursive helper to generate matches for this round
-    function generateMatch() {
-        // Base case: not enough players or reached court limit
-        if (availablePlayerIds.length < 2 || roundMatches.length >= maxCourts) {
-            return;
+// Initialize history data structures for all players
+function initializeHistory(playerIds) {
+    playerIds.forEach(p => {
+        if (!opponentCount[p]) {
+            opponentCount[p] = {};
+        }
+        if (!lastOpponentRound[p]) {
+            lastOpponentRound[p] = {};
         }
         
-        // Step 1: Sort available players by rating (descending)
-        const sortedPlayers = availablePlayerIds
-            .map(id => players.find(p => p.id === id))
-            .filter(p => p !== undefined)
-            .sort((a, b) => b.rating - a.rating)
-            .map(p => p.id);
-        
-        // Step 1.5: Prioritize sitting players if available
-        let currentPlayer;
-        let playerPool = [...sortedPlayers];
-        
-        if (sittingPlayers.length > 0) {
-            // Filter to only sitting players who are still available
-            const availableSittingPlayers = sittingPlayers.filter(id => 
-                sortedPlayers.includes(id) && !playersInRound.has(id)
-            );
-            
-            if (availableSittingPlayers.length > 0) {
-                // Select random sitting player
-                const randomIndex = Math.floor(Math.random() * availableSittingPlayers.length);
-                currentPlayer = availableSittingPlayers[randomIndex];
-            }
-        }
-        
-        // If no sitting player selected, select random from available
-        if (!currentPlayer) {
-            const availableForSelection = sortedPlayers.filter(id => !playersInRound.has(id));
-            if (availableForSelection.length === 0) return;
-            
-            const randomIndex = Math.floor(Math.random() * availableForSelection.length);
-            currentPlayer = availableForSelection[randomIndex];
-        }
-        
-        // Remove currentPlayer from playerPool
-        playerPool = playerPool.filter(id => id !== currentPlayer && !playersInRound.has(id));
-        
-        if (playerPool.length === 0) return; // No opponents available
-        
-        // Step 5: Find past opponents from last 3 rounds
-        const pastOpponents = [];
-        const currentPlayerObj = players.find(p => p.id === currentPlayer);
-        if (!currentPlayerObj) return;
-        
-        // Check each past round (oldest to newest)
-        for (let i = 0; i < pastRounds.length; i++) {
-            const round = pastRounds[i];
-            const roundsAgo = pastRounds.length - i; // 1 = most recent, 3 = oldest
-            
-            round.forEach(match => {
-                // Check if currentPlayer played in this match
-                const playedInMatch = match.team1[0] === currentPlayer || match.team2[0] === currentPlayer;
-                if (playedInMatch) {
-                    // Find opponent
-                    const opponent = match.team1[0] === currentPlayer ? match.team2[0] : match.team1[0];
-                    if (!pastOpponents.find(po => po.id === opponent && po.roundsAgo === roundsAgo)) {
-                        pastOpponents.push({ id: opponent, roundsAgo: roundsAgo });
-                    }
+        playerIds.forEach(q => {
+            if (p !== q) {
+                if (!opponentCount[p][q]) {
+                    opponentCount[p][q] = 0;
                 }
-            });
-        }
-        
-        // Step 3: Calculate expected scores for each potential opponent
-        const playerPoolWithScores = playerPool.map(opponentId => {
-            const opponent = players.find(p => p.id === opponentId);
-            if (!opponent) return null;
-            
-            // Calculate expected score using ELO formula
-            const expectedScore = 1 / (1 + Math.pow(10, (opponent.rating - currentPlayerObj.rating) / 400));
-            
-            return {
-                id: opponentId,
-                expectedScore: expectedScore
-            };
-        }).filter(item => item !== null);
-        
-        // Step 3.5: Remove most recent opponent from playerPool if pastOpponents exists
-        if (pastOpponents.length > 0) {
-            // Sort pastOpponents by roundsAgo (most recent first)
-            pastOpponents.sort((a, b) => a.roundsAgo - b.roundsAgo);
-            const mostRecentOpponent = pastOpponents[0].id;
-            
-            // Remove from playerPool
-            const indexToRemove = playerPoolWithScores.findIndex(p => p.id === mostRecentOpponent);
-            if (indexToRemove !== -1) {
-                playerPoolWithScores.splice(indexToRemove, 1);
-                pastOpponents.shift(); // Remove from pastOpponents
-            }
-        }
-        
-        if (playerPoolWithScores.length === 0) return; // No valid opponents
-        
-        // Step 4: Calculate probabilities using Gaussian distribution
-        const s = 1 / Math.sqrt(2 * Math.PI);
-        const nextPlayerProbability = playerPoolWithScores.map(player => {
-            const x = player.expectedScore;
-            // Gaussian: 1/(s*sqrt(2*pi)) * e^(-((x-0.5)^2)/(2*s^2))
-            const probability = (1 / (s * Math.sqrt(2 * Math.PI))) * 
-                               Math.exp(-2*Math.pow(x - 0.5, 2) / (s * s));
-            return {
-                id: player.id,
-                probability: probability
-            };
-        });
-        
-        // Step 4.5: Reduce probability for remaining past opponents
-        pastOpponents.forEach(pastOpp => {
-            const playerIndex = nextPlayerProbability.findIndex(p => p.id === pastOpp.id);
-            if (playerIndex !== -1) {
-                // Reduce by (1 - 1/(4^n)) where n is rounds since they last played
-                const reductionFactor = 1 - (1 / Math.pow(4, pastOpp.roundsAgo));
-                nextPlayerProbability[playerIndex].probability *= reductionFactor;
+                if (!lastOpponentRound[p][q]) {
+                    lastOpponentRound[p][q] = -Infinity;
+                }
             }
         });
-        
-        // Step 7: Sum all probabilities and generate random choice
-        const totalProbability = nextPlayerProbability.reduce((sum, p) => sum + p.probability, 0);
-        if (totalProbability <= 0) return; // Safety check
-        
-        const playerChoice = Math.random() * totalProbability;
-        
-        // Step 8: Select opponent using cumulative sum
-        let cumulativeSum = 0;
-        let selectedOpponent = null;
-        
-        for (let i = 0; i < nextPlayerProbability.length; i++) {
-            cumulativeSum += nextPlayerProbability[i].probability;
-            if (playerChoice <= cumulativeSum) {
-                selectedOpponent = nextPlayerProbability[i].id;
-                break;
-            }
+    });
+}
+
+function generateSinglesRound(allPlayers, roundIndex, sittingPlayersPrev, pastRounds, numCourts) {
+    const availablePlayers = [...allPlayers]; // Copy to avoid mutation
+    const roundMatches = [];
+    let courtsUsed = 0;
+    
+    // Ensure we treat previous sitting players preferentially as seeds
+    // But we still must intersect with currently available players
+    const prioritizedSeeds = allPlayers.filter(p => sittingPlayersPrev.has(p) && availablePlayers.includes(p));
+    
+    while (courtsUsed < numCourts && availablePlayers.length >= 2) {
+        // --- 1. Choose seed player ---
+        let seed;
+        if (prioritizedSeeds.length > 0) {
+            const randomIndex = Math.floor(Math.random() * prioritizedSeeds.length);
+            seed = prioritizedSeeds[randomIndex];
+            prioritizedSeeds.splice(randomIndex, 1);
+        } else {
+            const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+            seed = availablePlayers[randomIndex];
         }
         
-        // Fallback: select last player if none selected (shouldn't happen, but safety)
-        if (!selectedOpponent && nextPlayerProbability.length > 0) {
-            selectedOpponent = nextPlayerProbability[nextPlayerProbability.length - 1].id;
+        // Remove seed from available players
+        const seedIndex = availablePlayers.indexOf(seed);
+        if (seedIndex === -1) break;
+        availablePlayers.splice(seedIndex, 1);
+        
+        // --- 2. Probabilistically select opponent ---
+        const candidatePool = availablePlayers.filter(p => p !== seed);
+        
+        if (candidatePool.length === 0) {
+            break; // Can't form a match
         }
         
-        if (!selectedOpponent) return;
+        const chosen = chooseNextPlayerProbabilistic(
+            seed,
+            [seed], // groupSoFar (just the seed for singles)
+            candidatePool,
+            roundIndex,
+            pastRounds
+        );
         
-        // Step 6: Create match and add to matches array
+        if (chosen === null) {
+            // No viable candidates; put seed back and try next seed
+            availablePlayers.push(seed);
+            continue;
+        }
+        
+        // Optional: enforce hard group spread limit
+        const seedPlayer = players.find(p => p.id === seed);
+        const chosenPlayer = players.find(p => p.id === chosen);
+        if (!seedPlayer || !chosenPlayer) {
+            availablePlayers.push(seed);
+            continue;
+        }
+        
+        const spread = Math.abs(seedPlayer.rating - chosenPlayer.rating);
+        const hardSpreadLimit = MATCHMAKING_CONFIG.SPREAD_TOL * 2; // Allow some flexibility
+        if (spread > hardSpreadLimit) {
+            // Try again with next seed
+            availablePlayers.push(seed);
+            continue;
+        }
+        
+        // --- 3. Create match (for singles, no team split needed) ---
         const match = {
             id: `singles-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             type: 'singles',
-            team1: [currentPlayer],
-            team2: [selectedOpponent],
-            round: roundNum,
+            team1: [seed],
+            team2: [chosen],
+            round: roundIndex,
             completed: false
         };
         
-        matches.push(match);
         roundMatches.push(match);
+        matches.push(match);
         
-        // Mark players as used in this round
-        playersInRound.add(currentPlayer);
-        playersInRound.add(selectedOpponent);
+        // Remove chosen player from available pool
+        const chosenIndex = availablePlayers.indexOf(chosen);
+        if (chosenIndex !== -1) {
+            availablePlayers.splice(chosenIndex, 1);
+        }
         
-        // Remove matched players from available list
-        const currentPlayerIndex = availablePlayerIds.indexOf(currentPlayer);
-        if (currentPlayerIndex !== -1) availablePlayerIds.splice(currentPlayerIndex, 1);
-        const opponentIndex = availablePlayerIds.indexOf(selectedOpponent);
-        if (opponentIndex !== -1) availablePlayerIds.splice(opponentIndex, 1);
+        // Remove from prioritizedSeeds if present
+        const seedIndexInPrioritized = prioritizedSeeds.indexOf(seed);
+        if (seedIndexInPrioritized !== -1) {
+            prioritizedSeeds.splice(seedIndexInPrioritized, 1);
+        }
+        const chosenIndexInPrioritized = prioritizedSeeds.indexOf(chosen);
+        if (chosenIndexInPrioritized !== -1) {
+            prioritizedSeeds.splice(chosenIndexInPrioritized, 1);
+        }
         
-        // Recursively generate next match for this round
-        generateMatch();
+        courtsUsed += 1;
     }
     
-    // Start generating matches for this round
-    generateMatch();
+    // Remaining players (if any) sit out this round
+    const newSittingPlayers = new Set(availablePlayers);
     
     return roundMatches;
 }
 
+// Probabilistic candidate selection with scoring function
+function chooseNextPlayerProbabilistic(seed, groupSoFar, candidatePool, roundIndex, pastRounds) {
+    const scores = {};  // candidate -> score
+    const weights = {};
+    
+    for (const candidate of candidatePool) {
+        const s = scoreCandidate(
+            seed,
+            candidate,
+            groupSoFar,
+            roundIndex,
+            pastRounds
+        );
+        
+        // If the candidate is "forbidden" (e.g. last round opponent), skip
+        if (s === Infinity) {
+            continue;
+        }
+        
+        scores[candidate] = s;
+    }
+    
+    if (Object.keys(scores).length === 0) {
+        return null; // No viable candidates
+    }
+    
+    // Softmax over -score: lower score → higher weight
+    let totalWeight = 0.0;
+    for (const candidate in scores) {
+        const w = Math.exp(-MATCHMAKING_CONFIG.ALPHA_SOFTMAX * scores[candidate]);
+        weights[candidate] = w;
+        totalWeight += w;
+    }
+    
+    if (totalWeight === 0) {
+        return null; // Degenerate case; could fall back to uniform random
+    }
+    
+    // Randomly sample one candidate according to weights
+    const r = Math.random() * totalWeight;
+    let cumulative = 0.0;
+    for (const candidate in weights) {
+        cumulative += weights[candidate];
+        if (r <= cumulative) {
+            return candidate;
+        }
+    }
+    
+    // Fallback, due to floating-point issues
+    return Object.keys(weights)[0];
+}
+
+// Scoring function: combine skill, opponent history, spread
+function scoreCandidate(seed, candidate, groupSoFar, roundIndex, pastRounds) {
+    const seedPlayer = players.find(p => p.id === seed);
+    const candidatePlayer = players.find(p => p.id === candidate);
+    
+    if (!seedPlayer || !candidatePlayer) {
+        return Infinity; // Invalid players
+    }
+    
+    // --- A. Hard rule: no immediate repeat opponent with seed ---
+    // Check pastRounds first (for immediate repeats within generation session)
+    if (pastRounds && pastRounds.length > 0) {
+        // Check the most recent round
+        const mostRecentRound = pastRounds[pastRounds.length - 1];
+        for (const match of mostRecentRound) {
+            if (match.type === 'singles') {
+                const p1 = match.team1[0];
+                const p2 = match.team2[0];
+                if ((p1 === seed && p2 === candidate) || (p1 === candidate && p2 === seed)) {
+                    return Infinity; // Forbid immediate repeat
+                }
+            }
+        }
+    }
+    
+    // Also check completed match history
+    const lastSeedOpponentRound = lastOpponentRound[seed] && lastOpponentRound[seed][candidate] !== undefined
+        ? lastOpponentRound[seed][candidate]
+        : -Infinity;
+    
+    if (lastSeedOpponentRound === roundIndex - 1) {
+        return Infinity; // Forbid this candidate
+    }
+    
+    // --- B. Skill term: want expected_score close to 0.5 ---
+    const es = expectedScore(seed, candidate);
+    const skill_term = Math.pow(es - 0.5, 2) / (2 * Math.pow(MATCHMAKING_CONFIG.SIGMA_SKILL, 2));
+    
+    // --- C. Opponent history term: penalize recent frequent opponents ---
+    let opp_term = 0.0;
+    
+    // Check history with seed
+    const c = opponentCount[candidate] && opponentCount[candidate][seed] !== undefined
+        ? opponentCount[candidate][seed]
+        : 0;
+    
+    if (c > 0) {
+        const lastRound = lastOpponentRound[candidate] && lastOpponentRound[candidate][seed] !== undefined
+            ? lastOpponentRound[candidate][seed]
+            : -Infinity;
+        const roundsAgo = roundIndex - lastRound;
+        
+        if (roundsAgo > 0) {
+            const decay = 1.0 / Math.pow(2, roundsAgo); // More recent → higher penalty
+            opp_term += c * decay;
+        }
+    }
+    
+    // Also check with seed's perspective
+    const c2 = opponentCount[seed] && opponentCount[seed][candidate] !== undefined
+        ? opponentCount[seed][candidate]
+        : 0;
+    
+    if (c2 > 0) {
+        const lastRound = lastOpponentRound[seed] && lastOpponentRound[seed][candidate] !== undefined
+            ? lastOpponentRound[seed][candidate]
+            : -Infinity;
+        const roundsAgo = roundIndex - lastRound;
+        
+        if (roundsAgo > 0) {
+            const decay = 1.0 / Math.pow(2, roundsAgo);
+            opp_term += c2 * decay;
+        }
+    }
+    
+    // --- D. Spread term: avoid huge rating range in this 2-player match ---
+    const groupRatings = groupSoFar.map(p => {
+        const player = players.find(pl => pl.id === p);
+        return player ? player.rating : 0;
+    });
+    groupRatings.push(candidatePlayer.rating);
+    
+    const spread = Math.max(...groupRatings) - Math.min(...groupRatings);
+    
+    let spread_term = 0.0;
+    if (spread <= MATCHMAKING_CONFIG.SPREAD_TOL) {
+        spread_term = 0.0;
+    } else {
+        spread_term = spread - MATCHMAKING_CONFIG.SPREAD_TOL; // Penalty only for extra spread
+    }
+    
+    // --- E. Combine ---
+    const score = MATCHMAKING_CONFIG.W_SKILL * skill_term +
+                  MATCHMAKING_CONFIG.W_OPP * opp_term +
+                  MATCHMAKING_CONFIG.W_SPREAD * spread_term;
+    
+    return score;
+}
+
+// Expected score (Elo-style)
+function expectedScore(i, j) {
+    const playerI = players.find(p => p.id === i);
+    const playerJ = players.find(p => p.id === j);
+    
+    if (!playerI || !playerJ) {
+        return 0.5; // Default to even if players not found
+    }
+    
+    const R_i = playerI.rating;
+    const R_j = playerJ.rating;
+    
+    // Elo expected score: probability i defeats j
+    return 1.0 / (1.0 + Math.pow(10, (R_j - R_i) / 400.0));
+}
+
+// Updating history from the round
+function updateHistoryFromRound(roundMatches, roundIndex) {
+    for (const match of roundMatches) {
+        const teamA = match.team1; // [p1] for singles
+        const teamB = match.team2; // [p2] for singles
+        
+        // For singles, update opponent history
+        const p1 = teamA[0];
+        const p2 = teamB[0];
+        
+        // Initialize if needed
+        if (!opponentCount[p1]) {
+            opponentCount[p1] = {};
+        }
+        if (!opponentCount[p2]) {
+            opponentCount[p2] = {};
+        }
+        if (!lastOpponentRound[p1]) {
+            lastOpponentRound[p1] = {};
+        }
+        if (!lastOpponentRound[p2]) {
+            lastOpponentRound[p2] = {};
+        }
+        
+        // Update opponent history
+        opponentCount[p1][p2] = (opponentCount[p1][p2] || 0) + 1;
+        opponentCount[p2][p1] = (opponentCount[p2][p1] || 0) + 1;
+        lastOpponentRound[p1][p2] = roundIndex;
+        lastOpponentRound[p2][p1] = roundIndex;
+    }
+}
+
 function generateDoublesMatches(selectedPlayerIds, numRounds, maxCourts) {
-    // TODO: Implement matchmaking algorithm for doubles matches
-    //
+    // Get the starting round number (next round after existing matches)
+    const startRound = getMaxRoundNumber() + 1;
+    
+    // Initialize history data structures
+    initializeDoublesHistory(selectedPlayerIds);
+    
+    // Initialize past rounds queue and sitting players
+    const pastRounds = []; // Queue of last MAX_PAST_ROUNDS rounds, oldest at front
+    let sittingPlayers = new Set();
+    
+    // Generate all rounds
+    for (let roundNum = startRound; roundNum < startRound + numRounds; roundNum++) {
+        const roundMatches = generateDoublesRound(
+            selectedPlayerIds,
+            roundNum,
+            sittingPlayers,
+            pastRounds,
+            maxCourts
+        );
+        
+        // Push round into queue of past rounds (for avoiding immediate repeats within generation session)
+        pastRounds.push(roundMatches);
+        if (pastRounds.length > MATCHMAKING_CONFIG.MAX_PAST_ROUNDS) {
+            pastRounds.shift(); // Remove oldest round
+        }
+        
+        // Note: History is updated when matches are completed (in submitScore/submitManualMatch),
+        // not during generation, since generated matches haven't been played yet
+        
+        // Update sitting players for next round
+        const playingThisRound = new Set();
+        roundMatches.forEach(match => {
+            match.team1.forEach(playerId => playingThisRound.add(playerId));
+            match.team2.forEach(playerId => playingThisRound.add(playerId));
+        });
+        
+        sittingPlayers = new Set();
+        selectedPlayerIds.forEach(playerId => {
+            if (!playingThisRound.has(playerId)) {
+                sittingPlayers.add(playerId);
+            }
+        });
+    }
+}
+
+// Initialize doubles history data structures for all players
+function initializeDoublesHistory(playerIds) {
+    playerIds.forEach(p => {
+        if (!partnerCount[p]) {
+            partnerCount[p] = {};
+        }
+        if (!lastPartnerRound[p]) {
+            lastPartnerRound[p] = {};
+        }
+        if (!opponentCount[p]) {
+            opponentCount[p] = {};
+        }
+        if (!lastOpponentRound[p]) {
+            lastOpponentRound[p] = {};
+        }
+        
+        playerIds.forEach(q => {
+            if (p !== q) {
+                if (!partnerCount[p][q]) {
+                    partnerCount[p][q] = 0;
+                }
+                if (!lastPartnerRound[p][q]) {
+                    lastPartnerRound[p][q] = -Infinity;
+                }
+                if (!opponentCount[p][q]) {
+                    opponentCount[p][q] = 0;
+                }
+                if (!lastOpponentRound[p][q]) {
+                    lastOpponentRound[p][q] = -Infinity;
+                }
+            }
+        });
+    });
+}
+
+function generateDoublesRound(allPlayers, roundIndex, sittingPlayersPrev, pastRounds, numCourts) {
+    const availablePlayers = [...allPlayers]; // Copy to avoid mutation
+    const roundMatches = [];
+    let courtsUsed = 0;
+    
+    // Ensure we treat previous sitting players preferentially as seeds
+    // But we still must intersect with currently available players
+    const prioritizedSeeds = allPlayers.filter(p => sittingPlayersPrev.has(p) && availablePlayers.includes(p));
+    
+    while (courtsUsed < numCourts && availablePlayers.length >= 4) {
+        // --- 1. Choose seed player ---
+        let seed;
+        if (prioritizedSeeds.length > 0) {
+            const randomIndex = Math.floor(Math.random() * prioritizedSeeds.length);
+            seed = prioritizedSeeds[randomIndex];
+            prioritizedSeeds.splice(randomIndex, 1);
+        } else {
+            const randomIndex = Math.floor(Math.random() * availablePlayers.length);
+            seed = availablePlayers[randomIndex];
+        }
+        
+        // Remove seed from available players
+        const seedIndex = availablePlayers.indexOf(seed);
+        if (seedIndex === -1) break;
+        availablePlayers.splice(seedIndex, 1);
+        
+        const group = [seed];
+        
+        // --- 2. Probabilistically select 3 more players around the seed ---
+        for (let k = 1; k <= 3; k++) {
+            const candidatePool = availablePlayers.filter(p => p !== seed && !group.includes(p));
+            
+            if (candidatePool.length === 0) {
+                break; // Can't fill group; will exit loop below
+            }
+            
+            const chosen = chooseNextPlayerProbabilisticDoubles(
+                seed,
+                group,
+                candidatePool,
+                roundIndex,
+                pastRounds
+            );
+            
+            if (chosen === null) {
+                break; // No viable candidates (all zero weights); exit
+            }
+            
+            group.push(chosen);
+            
+            // Remove chosen from available players
+            const chosenIndex = availablePlayers.indexOf(chosen);
+            if (chosenIndex !== -1) {
+                availablePlayers.splice(chosenIndex, 1);
+            }
+        }
+        
+        // If we didn't get 4 players, stop forming matches
+        if (group.length < 4) {
+            // Put seed back and try next seed
+            availablePlayers.push(seed);
+            continue;
+        }
+        
+        // Optional: enforce hard group spread limit
+        const groupRatings = group.map(p => {
+            const player = players.find(pl => pl.id === p);
+            return player ? player.rating : 0;
+        });
+        const spread = Math.max(...groupRatings) - Math.min(...groupRatings);
+        const hardSpreadLimit = MATCHMAKING_CONFIG.SPREAD_TOL * 2; // Allow some flexibility
+        if (spread > hardSpreadLimit) {
+            // Try again with next seed
+            availablePlayers.push(seed);
+            // Put back the other players
+            group.slice(1).forEach(p => availablePlayers.push(p));
+            continue;
+        }
+        
+        // --- 3. Decide team split to balance Elo ---
+        const [teamA, teamB] = chooseBestTeamSplit(group);
+        
+        // --- 4. Save match, remove players from available pool ---
+        const match = {
+            id: `doubles-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            type: 'doubles',
+            team1: teamA,
+            team2: teamB,
+            round: roundIndex,
+            completed: false
+        };
+        
+        roundMatches.push(match);
+        matches.push(match);
+        
+        // Remove from prioritizedSeeds if present
+        group.forEach(p => {
+            const indexInPrioritized = prioritizedSeeds.indexOf(p);
+            if (indexInPrioritized !== -1) {
+                prioritizedSeeds.splice(indexInPrioritized, 1);
+            }
+        });
+        
+        courtsUsed += 1;
+    }
+    
+    // Remaining players (if any) sit out this round
+    const newSittingPlayers = new Set(availablePlayers);
+    
+    return roundMatches;
+}
+
+// Probabilistic candidate selection for doubles
+function chooseNextPlayerProbabilisticDoubles(seed, groupSoFar, candidatePool, roundIndex, pastRounds) {
+    const scores = {};  // candidate -> score
+    const weights = {};
+    
+    for (const candidate of candidatePool) {
+        const s = scoreCandidateDoubles(
+            seed,
+            candidate,
+            groupSoFar,
+            roundIndex,
+            pastRounds
+        );
+        
+        // If the candidate is "forbidden" (e.g. last round partner), skip
+        if (s === Infinity) {
+            continue;
+        }
+        
+        scores[candidate] = s;
+    }
+    
+    if (Object.keys(scores).length === 0) {
+        return null; // No viable candidates
+    }
+    
+    // Softmax over -score: lower score → higher weight
+    let totalWeight = 0.0;
+    for (const candidate in scores) {
+        const w = Math.exp(-MATCHMAKING_CONFIG.ALPHA_SOFTMAX * scores[candidate]);
+        weights[candidate] = w;
+        totalWeight += w;
+    }
+    
+    if (totalWeight === 0) {
+        return null; // Degenerate case; could fall back to uniform random
+    }
+    
+    // Randomly sample one candidate according to weights
+    const r = Math.random() * totalWeight;
+    let cumulative = 0.0;
+    for (const candidate in weights) {
+        cumulative += weights[candidate];
+        if (r <= cumulative) {
+            return candidate;
+        }
+    }
+    
+    // Fallback, due to floating-point issues
+    return Object.keys(weights)[0];
+}
+
+// Scoring function for doubles: combine skill, partner history, opponents, spread
+function scoreCandidateDoubles(seed, candidate, groupSoFar, roundIndex, pastRounds) {
+    const seedPlayer = players.find(p => p.id === seed);
+    const candidatePlayer = players.find(p => p.id === candidate);
+    
+    if (!seedPlayer || !candidatePlayer) {
+        return Infinity; // Invalid players
+    }
+    
+    // --- A. Hard rule: no immediate repeat partner with seed ---
+    // Check pastRounds first (for immediate repeats within generation session)
+    if (pastRounds && pastRounds.length > 0) {
+        const mostRecentRound = pastRounds[pastRounds.length - 1];
+        for (const match of mostRecentRound) {
+            if (match.type === 'doubles') {
+                const team1 = match.team1;
+                const team2 = match.team2;
+                // Check if seed and candidate were partners in the most recent round
+                if ((team1.includes(seed) && team1.includes(candidate)) ||
+                    (team2.includes(seed) && team2.includes(candidate))) {
+                    return Infinity; // Forbid immediate repeat
+                }
+            }
+        }
+    }
+    
+    // Also check completed match history
+    const lastSeedPartnerRound = lastPartnerRound[seed] && lastPartnerRound[seed][candidate] !== undefined
+        ? lastPartnerRound[seed][candidate]
+        : -Infinity;
+    
+    if (lastSeedPartnerRound === roundIndex - 1) {
+        return Infinity; // Forbid this candidate
+    }
+    
+    // --- B. Skill term: want expected_score close to 0.5 ---
+    const es = expectedScore(seed, candidate);
+    const skill_term = Math.pow(es - 0.5, 2) / (2 * Math.pow(MATCHMAKING_CONFIG.SIGMA_SKILL, 2));
+    
+    // --- C. Partner history term: penalize recent frequent partners with groupSoFar ---
+    let partner_term = 0.0;
+    for (const q of groupSoFar) {
+        if (q === candidate) continue;
+        
+        const c = partnerCount[candidate] && partnerCount[candidate][q] !== undefined
+            ? partnerCount[candidate][q]
+            : 0;
+        
+        if (c > 0) {
+            const lastRound = lastPartnerRound[candidate] && lastPartnerRound[candidate][q] !== undefined
+                ? lastPartnerRound[candidate][q]
+                : -Infinity;
+            const roundsAgo = roundIndex - lastRound;
+            
+            // If negative (never), skip
+            if (roundsAgo > 0) {
+                const decay = 1.0 / Math.pow(2, roundsAgo); // More recent → higher penalty
+                partner_term += c * decay;
+            }
+        }
+    }
+    
+    // --- D. Opponent history term ---
+    let opp_term = 0.0;
+    for (const q of groupSoFar) {
+        if (q === candidate) continue;
+        
+        const c = opponentCount[candidate] && opponentCount[candidate][q] !== undefined
+            ? opponentCount[candidate][q]
+            : 0;
+        
+        if (c > 0) {
+            const lastRound = lastOpponentRound[candidate] && lastOpponentRound[candidate][q] !== undefined
+                ? lastOpponentRound[candidate][q]
+                : -Infinity;
+            const roundsAgo = roundIndex - lastRound;
+            
+            if (roundsAgo > 0) {
+                const decay = 1.0 / Math.pow(2, roundsAgo);
+                opp_term += c * decay;
+            }
+        }
+    }
+    
+    // --- E. Spread term: avoid huge rating range in this 4-player group ---
+    const groupRatings = groupSoFar.map(p => {
+        const player = players.find(pl => pl.id === p);
+        return player ? player.rating : 0;
+    });
+    groupRatings.push(candidatePlayer.rating);
+    
+    const spread = Math.max(...groupRatings) - Math.min(...groupRatings);
+    
+    let spread_term = 0.0;
+    if (spread <= MATCHMAKING_CONFIG.SPREAD_TOL) {
+        spread_term = 0.0;
+    } else {
+        spread_term = spread - MATCHMAKING_CONFIG.SPREAD_TOL; // Penalty only for extra spread
+    }
+    
+    // --- F. Combine ---
+    const score = MATCHMAKING_CONFIG.W_SKILL * skill_term +
+                  MATCHMAKING_CONFIG.W_PARTNER * partner_term +
+                  MATCHMAKING_CONFIG.W_OPP * opp_term +
+                  MATCHMAKING_CONFIG.W_SPREAD * spread_term;
+    
+    return score;
+}
+
+// Team composite rating for doubles
+function teamCompositeRating(p1, p2) {
+    const player1 = players.find(p => p.id === p1);
+    const player2 = players.find(p => p.id === p2);
+    
+    if (!player1 || !player2) {
+        return 0;
+    }
+    
+    const hi = Math.max(player1.rating, player2.rating);
+    const lo = Math.min(player1.rating, player2.rating);
+    return (2.0 / 3.0) * hi + (1.0 / 3.0) * lo;
+}
+
+// Choose best team split for a 4-player group
+function chooseBestTeamSplit(groupOf4) {
+    // groupOf4 = [a, b, c, d] in any order
+    const [a, b, c, d] = groupOf4;
+    
+    const splits = [
+        [[a, b], [c, d]],
+        [[a, c], [b, d]],
+        [[a, d], [b, c]]
+    ];
+    
+    let bestSplit = null;
+    let bestDiff = Infinity;
+    
+    for (const [teamA, teamB] of splits) {
+        const tA = teamCompositeRating(teamA[0], teamA[1]);
+        const tB = teamCompositeRating(teamB[0], teamB[1]);
+        
+        const diff = Math.abs(tA - tB);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestSplit = [teamA, teamB];
+        }
+    }
+    
+    return bestSplit;
+}
+
+// Updating history from doubles round
+function updateDoublesHistoryFromRound(roundMatches, roundIndex) {
+    for (const match of roundMatches) {
+        if (match.type !== 'doubles') continue;
+        
+        const teamA = match.team1; // [p1, p2]
+        const teamB = match.team2; // [p3, p4]
+        
+        // Update partner history
+        const p1 = teamA[0];
+        const p2 = teamA[1];
+        const p3 = teamB[0];
+        const p4 = teamB[1];
+        
+        // Initialize if needed
+        [p1, p2, p3, p4].forEach(p => {
+            if (!partnerCount[p]) {
+                partnerCount[p] = {};
+            }
+            if (!opponentCount[p]) {
+                opponentCount[p] = {};
+            }
+            if (!lastPartnerRound[p]) {
+                lastPartnerRound[p] = {};
+            }
+            if (!lastOpponentRound[p]) {
+                lastOpponentRound[p] = {};
+            }
+        });
+        
+        // Update partner history for teamA
+        partnerCount[p1][p2] = (partnerCount[p1][p2] || 0) + 1;
+        partnerCount[p2][p1] = (partnerCount[p2][p1] || 0) + 1;
+        lastPartnerRound[p1][p2] = roundIndex;
+        lastPartnerRound[p2][p1] = roundIndex;
+        
+        // Update partner history for teamB
+        partnerCount[p3][p4] = (partnerCount[p3][p4] || 0) + 1;
+        partnerCount[p4][p3] = (partnerCount[p4][p3] || 0) + 1;
+        lastPartnerRound[p3][p4] = roundIndex;
+        lastPartnerRound[p4][p3] = roundIndex;
+        
+        // Update opponent history
+        for (const a of teamA) {
+            for (const b of teamB) {
+                opponentCount[a][b] = (opponentCount[a][b] || 0) + 1;
+                opponentCount[b][a] = (opponentCount[b][a] || 0) + 1;
+                lastOpponentRound[a][b] = roundIndex;
+                lastOpponentRound[b][a] = roundIndex;
+            }
+        }
+    }
 }
 
 function clearMatches() {
@@ -1033,6 +1642,15 @@ function submitScore(event, matchId) {
         ...match,
         completedAt: new Date().toISOString()
     });
+    
+    // Update matchmaking history for completed matches
+    if (match.round !== undefined) {
+        if (match.type === 'singles') {
+            updateHistoryFromRound([match], match.round);
+        } else if (match.type === 'doubles') {
+            updateDoublesHistoryFromRound([match], match.round);
+        }
+    }
     
     // Remove completed match from matches array (it's now only in history)
     matches = matches.filter(m => m.id !== matchId);
@@ -1671,6 +2289,15 @@ function submitManualMatch() {
         completedAt: new Date().toISOString()
     });
     
+    // Update matchmaking history for completed matches (if they have a round number)
+    if (match.round !== undefined) {
+        if (match.type === 'singles') {
+            updateHistoryFromRound([match], match.round);
+        } else if (match.type === 'doubles') {
+            updateDoublesHistoryFromRound([match], match.round);
+        }
+    }
+    
     // Clear form
     document.getElementById('manual-score1').value = '';
     document.getElementById('manual-score2').value = '';
@@ -1759,6 +2386,10 @@ function saveData() {
     localStorage.setItem('badmintonELO_matches', JSON.stringify(matches));
     localStorage.setItem('badmintonELO_history', JSON.stringify(matchHistory));
     localStorage.setItem('badmintonELO_eventPlayers', JSON.stringify(eventPlayers));
+    localStorage.setItem('badmintonELO_opponentCount', JSON.stringify(opponentCount));
+    localStorage.setItem('badmintonELO_lastOpponentRound', JSON.stringify(lastOpponentRound));
+    localStorage.setItem('badmintonELO_partnerCount', JSON.stringify(partnerCount));
+    localStorage.setItem('badmintonELO_lastPartnerRound', JSON.stringify(lastPartnerRound));
 }
 
 function loadData() {
@@ -1766,6 +2397,10 @@ function loadData() {
     const savedMatches = localStorage.getItem('badmintonELO_matches');
     const savedHistory = localStorage.getItem('badmintonELO_history');
     const savedEventPlayers = localStorage.getItem('badmintonELO_eventPlayers');
+    const savedOpponentCount = localStorage.getItem('badmintonELO_opponentCount');
+    const savedLastOpponentRound = localStorage.getItem('badmintonELO_lastOpponentRound');
+    const savedPartnerCount = localStorage.getItem('badmintonELO_partnerCount');
+    const savedLastPartnerRound = localStorage.getItem('badmintonELO_lastPartnerRound');
     
     if (savedPlayers) {
         players = JSON.parse(savedPlayers);
@@ -1782,6 +2417,123 @@ function loadData() {
     if (savedEventPlayers) {
         eventPlayers = JSON.parse(savedEventPlayers);
     }
+    
+    // Load history data structures (backward compatible with old save files)
+    // If all history exists, load it. Otherwise, rebuild from matchHistory (source of truth)
+    if (savedOpponentCount && savedLastOpponentRound && 
+        savedPartnerCount && savedLastPartnerRound) {
+        // All history exists - load it directly
+        opponentCount = JSON.parse(savedOpponentCount);
+        lastOpponentRound = JSON.parse(savedLastOpponentRound);
+        partnerCount = JSON.parse(savedPartnerCount);
+        lastPartnerRound = JSON.parse(savedLastPartnerRound);
+    } else {
+        // Some history is missing (e.g., old save files without partner history)
+        // Rebuild everything from matchHistory to ensure correctness
+        rebuildHistoryFromMatchHistory();
+    }
+}
+
+// Rebuild history data structures from matchHistory
+// This function rebuilds all history from matchHistory (the source of truth)
+// Used for backward compatibility with old save files that don't have all history fields
+function rebuildHistoryFromMatchHistory() {
+    // Clear and rebuild from matchHistory to ensure correctness
+    opponentCount = {};
+    lastOpponentRound = {};
+    partnerCount = {};
+    lastPartnerRound = {};
+    
+    // Process all matches in history
+    matchHistory.forEach(match => {
+        if (match.round === undefined) return;
+        
+        if (match.type === 'singles') {
+            const teamA = match.team1;
+            const teamB = match.team2;
+            const p1 = teamA[0];
+            const p2 = teamB[0];
+            
+            // Initialize if needed
+            if (!opponentCount[p1]) {
+                opponentCount[p1] = {};
+            }
+            if (!opponentCount[p2]) {
+                opponentCount[p2] = {};
+            }
+            if (!lastOpponentRound[p1]) {
+                lastOpponentRound[p1] = {};
+            }
+            if (!lastOpponentRound[p2]) {
+                lastOpponentRound[p2] = {};
+            }
+            
+            // Update counts and last round
+            opponentCount[p1][p2] = (opponentCount[p1][p2] || 0) + 1;
+            opponentCount[p2][p1] = (opponentCount[p2][p1] || 0) + 1;
+            
+            // Update last round (keep the most recent)
+            const currentLastRound = lastOpponentRound[p1][p2];
+            if (currentLastRound === undefined || match.round > currentLastRound) {
+                lastOpponentRound[p1][p2] = match.round;
+                lastOpponentRound[p2][p1] = match.round;
+            }
+        } else if (match.type === 'doubles') {
+            const teamA = match.team1; // [p1, p2]
+            const teamB = match.team2; // [p3, p4]
+            const p1 = teamA[0];
+            const p2 = teamA[1];
+            const p3 = teamB[0];
+            const p4 = teamB[1];
+            
+            // Initialize if needed
+            [p1, p2, p3, p4].forEach(p => {
+                if (!partnerCount[p]) {
+                    partnerCount[p] = {};
+                }
+                if (!opponentCount[p]) {
+                    opponentCount[p] = {};
+                }
+                if (!lastPartnerRound[p]) {
+                    lastPartnerRound[p] = {};
+                }
+                if (!lastOpponentRound[p]) {
+                    lastOpponentRound[p] = {};
+                }
+            });
+            
+            // Update partner history for teamA
+            partnerCount[p1][p2] = (partnerCount[p1][p2] || 0) + 1;
+            partnerCount[p2][p1] = (partnerCount[p2][p1] || 0) + 1;
+            const currentLastPartnerRoundA = lastPartnerRound[p1][p2];
+            if (currentLastPartnerRoundA === undefined || match.round > currentLastPartnerRoundA) {
+                lastPartnerRound[p1][p2] = match.round;
+                lastPartnerRound[p2][p1] = match.round;
+            }
+            
+            // Update partner history for teamB
+            partnerCount[p3][p4] = (partnerCount[p3][p4] || 0) + 1;
+            partnerCount[p4][p3] = (partnerCount[p4][p3] || 0) + 1;
+            const currentLastPartnerRoundB = lastPartnerRound[p3][p4];
+            if (currentLastPartnerRoundB === undefined || match.round > currentLastPartnerRoundB) {
+                lastPartnerRound[p3][p4] = match.round;
+                lastPartnerRound[p4][p3] = match.round;
+            }
+            
+            // Update opponent history
+            for (const a of teamA) {
+                for (const b of teamB) {
+                    opponentCount[a][b] = (opponentCount[a][b] || 0) + 1;
+                    opponentCount[b][a] = (opponentCount[b][a] || 0) + 1;
+                    const currentLastOpponentRound = lastOpponentRound[a][b];
+                    if (currentLastOpponentRound === undefined || match.round > currentLastOpponentRound) {
+                        lastOpponentRound[a][b] = match.round;
+                        lastOpponentRound[b][a] = match.round;
+                    }
+                }
+            }
+        }
+    });
 }
 
 // Make functions available globally for onclick handlers

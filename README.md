@@ -88,3 +88,4 @@ The application uses a standard ELO rating system with:
 
 Simply open `index.html` in your web browser. No installation or server required!
 
+
